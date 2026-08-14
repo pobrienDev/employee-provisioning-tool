@@ -1,0 +1,22 @@
+# Secrets — tenant ID, client ID, client secret
+.env
+
+# Per-hire input file (contains personal data from the form)
+hire.yaml
+
+# Real config — property/group IDs, naming rules (config.example.yaml will be the committed template)
+config.yaml
+
+# Audit logs
+logs/
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
