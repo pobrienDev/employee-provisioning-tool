@@ -1,0 +1,12 @@
+# Example configuration — copy to config.yaml and fill in real values.
+# config.yaml is git-ignored and never committed.
+
+tenant:
+  domain: example.onmicrosoft.com
+  usage_location: US   # ISO country code stamped on new accounts (required for licensing)
+
+naming:
+  # Role-account prefixes that `discover <property number>` checks, e.g. manager619
+  roles: [manager, assistant, maintenance]
+
+# Phase 3 adds: license SKU ID + property -> group ID mappings

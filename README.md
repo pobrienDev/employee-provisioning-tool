@@ -28,23 +28,24 @@ one reviewed command.
   require a new admin-consent round. Anything beyond them (password-profile
   writes, sign-in activity reads) is added only if a phase actually needs it.
 - **Secrets stay out of the repo:** credentials live in a git-ignored `.env`,
-  tenant-specific IDs in a git-ignored `config.yaml` (a committed
-  `config.example.yaml` will document the shape). The `.gitignore` was the
+  tenant-specific IDs in a git-ignored `config.yaml` (the committed
+  `config.example.yaml` documents the shape). The `.gitignore` was the
   repository's first commit.
 - **Personal data stays out of the repo and the logs:** per-hire input files
   are git-ignored, and the audit log records actions taken, not personal
   details.
 - **Reuse or create — human decides:** some hires take over an existing role
-  account, others get a fresh personal one. A discovery step reports the role
-  account's status (name, enabled/disabled, last activity); the operator
-  chooses `--reuse` or `--new`, and the tool does the clicking either way.
+  account, others get a fresh personal one. The `discover` command reports the
+  role account's status (whose name is on it, enabled/disabled, last sign-in);
+  the operator chooses `reuse` or `new`, and the tool does the clicking either
+  way.
 
 ## Status
 
 | Phase | Scope | State |
 |-------|-------|-------|
 | 1 | Client-credentials auth, list users | **done** |
-| 2 | Discovery + create (`--new`) or reuse (`--reuse`) with session revocation | planned |
+| 2 | `discover` lookup, collision-checked `new`, `reuse` with password reset + session revocation | **done** |
 | 3 | License assignment + property/role group membership | planned |
 | 4 | Offboarding: disable, strip groups and license | planned |
 | 5 | `--dry-run`, audit logging, per-hire checklist, login-info email draft | planned |
@@ -69,13 +70,44 @@ one reviewed command.
 3. **Credentials:** copy `.env.example` to `.env` and fill in the tenant ID,
    client (application) ID, and client secret from the app registration.
 
+4. **Config:** copy `config.example.yaml` to `config.yaml` and fill in the
+   tenant domain and the role-account prefixes used at your properties.
+
+Two optional permissions unlock extras:
+
+- `User-PasswordProfile.ReadWrite.All` — required for the password reset in
+  `reuse` (app-only password changes aren't covered by `User.ReadWrite.All`;
+  without it, `reuse` stops cleanly before changing anything).
+- `AuditLog.Read.All` (plus an Entra ID P1 license) — lets `discover` show
+  last sign-in times; without it the column is skipped.
+
 ## Usage
 
 With the venv activated:
 
 ```
-python provision.py list-users
+python provision.py list-users            # all users — the auth smoke test
+python provision.py discover 619          # role accounts for property 619
+python provision.py discover manager619   # accounts matching a UPN prefix
+python provision.py new                   # fresh account for the hire in hire.yaml
+python provision.py new --upn tsmith2     # ...with an explicit UPN
+python provision.py reuse                 # hand reuse_upn's account to the hire
+python provision.py reuse --upn manager619
 ```
 
-Lists every user in the tenant with UPN, enabled/disabled state, and title —
-the smoke test that proves auth works before anything that writes.
+`new` builds the UPN from first initial + last name, refuses to overwrite an
+existing account (suggesting available alternates instead), and creates the
+user with a temporary must-change password. `reuse` locks the departed
+employee out first — password reset, then session revocation — before
+renaming and re-enabling the account for the new hire.
+
+`hire.yaml` (git-ignored) carries the current hire's details:
+
+```yaml
+first_name: Taylor
+last_name: Example
+title: Property Manager
+property_name: Example Apartments
+# reuse mode only — the role account being handed over:
+reuse_upn: manager619
+```
