@@ -47,7 +47,7 @@ one reviewed command.
 | 1 | Client-credentials auth, list users | **done** |
 | 2 | `discover` lookup, collision-checked `new`, `reuse` with password reset + session revocation | **done** |
 | 3 | License assignment + property group membership (`skus` helper) | **done** |
-| 4 | Offboarding: disable, strip groups and license | planned |
+| 4 | Offboarding: `terminate` — disable, revoke sessions, strip groups and licenses | **done** |
 | 5 | `--dry-run`, audit logging, per-hire checklist, login-info email draft | planned |
 | 6 | Ticketing-system integration (pull form fields automatically) | stretch |
 
@@ -99,6 +99,8 @@ python provision.py new --upn tsmith2     # ...with an explicit UPN
 python provision.py reuse                 # hand reuse_upn's account to the hire
 python provision.py reuse --upn manager619
 python provision.py skus                  # license SKU IDs for config.yaml
+python provision.py terminate manager619        # preview the offboarding plan
+python provision.py terminate manager619 --yes  # actually offboard
 ```
 
 `new` builds the UPN from first initial + last name, refuses to overwrite an
@@ -112,6 +114,13 @@ note when `license_sku` is blank) and joins the account to the groups mapped
 to the hire's property, reporting each group by name and treating an
 already-present membership as fine. Transient Graph throttling and
 concurrency errors are retried automatically.
+
+`terminate` offboards in lockout-first order: disable the account and revoke
+every session, then remove all group memberships and licenses. Without
+`--yes` it only prints who would be offboarded and what would happen — the
+destructive path always requires the flag. Converting the mailbox to shared
+(if mail must be retained) is printed as a manual follow-up, since that is an
+Exchange operation outside the Graph v1.0 API.
 
 `hire.yaml` (git-ignored) carries the current hire's details:
 

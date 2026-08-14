@@ -204,3 +204,25 @@ class GraphClient:
         """Add the user to a group."""
         payload = {"@odata.id": f"{GRAPH_BASE}/directoryObjects/{user_id}"}
         self._request("POST", f"/groups/{group_id}/members/$ref", json=payload)
+
+    def remove_group_member(self, group_id, user_id):
+        """Remove the user from a group."""
+        self._request("DELETE", f"/groups/{group_id}/members/{user_id}/$ref")
+
+    def get_member_groups(self, user_id):
+        """Return the groups the user belongs to (id and displayName)."""
+        groups = []
+        url = f"/users/{user_id}/memberOf?$select=id,displayName"
+        while url:
+            page = self._request("GET", url).json()
+            groups.extend(
+                item for item in page.get("value", [])
+                if item.get("@odata.type") == "#microsoft.graph.group"
+            )
+            url = page.get("@odata.nextLink")
+        return groups
+
+    def remove_licenses(self, user_id, sku_ids):
+        """Remove license SKUs from the user."""
+        payload = {"addLicenses": [], "removeLicenses": sku_ids}
+        self._request("POST", f"/users/{user_id}/assignLicense", json=payload)

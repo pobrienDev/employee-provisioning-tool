@@ -337,6 +337,56 @@ def cmd_reuse(args):
     provision_extras(client, config, hire, user["id"])
 
 
+def cmd_terminate(args):
+    config = load_config()
+    client = GraphClient.from_env()
+    domain = tenant_domain(config, required=False)
+    upn = args.upn if "@" in args.upn or not domain else f"{args.upn}@{domain}"
+
+    user = client.get_user(upn, USER_FIELDS + ",assignedLicenses")
+    if not user:
+        raise ProvisionError(f"{upn} not found")
+
+    groups = client.get_member_groups(user["id"])
+    licenses = [lic["skuId"] for lic in user.get("assignedLicenses") or []]
+
+    print("Terminating:")
+    print_user(user)
+    print(
+        f"  plan: disable account, revoke sessions, remove "
+        f"{len(groups)} group membership(s), remove {len(licenses)} license(s)"
+    )
+    if not args.yes:
+        raise ProvisionError("nothing done — re-run with --yes to offboard this account")
+
+    # Lock out first, then clean up.
+    client.update_user(user["id"], {"accountEnabled": False})
+    client.revoke_sessions(user["id"])
+    print("  account disabled, sessions revoked")
+
+    failed = []
+    for group in groups:
+        label = group.get("displayName") or group["id"]
+        try:
+            client.remove_group_member(group["id"], user["id"])
+            print(f"  removed from group: {label}")
+        except GraphError as exc:
+            failed.append(label)
+            print(f"  could not remove from {label}: {exc}")
+
+    if licenses:
+        client.remove_licenses(user["id"], licenses)
+        print(f"  removed {len(licenses)} license(s)")
+    else:
+        print("  no licenses to remove")
+
+    print("  manual step if mail must be retained: convert the mailbox to shared (Exchange admin center)")
+    if failed:
+        raise ProvisionError(
+            f"offboarding finished with issues — still a member of: {', '.join(failed)}"
+        )
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="provision",
@@ -373,6 +423,16 @@ def main(argv=None):
         "skus", help="list license SKUs and their IDs (for license_sku in config.yaml)"
     )
     skus.set_defaults(func=cmd_skus)
+
+    terminate = subparsers.add_parser(
+        "terminate", help="offboard an account: disable, revoke sessions, strip groups and licenses"
+    )
+    terminate.add_argument("upn", help="the account to offboard (domain appended if omitted)")
+    terminate.add_argument(
+        "--yes", action="store_true",
+        help="actually offboard; without it the command only previews the plan",
+    )
+    terminate.set_defaults(func=cmd_terminate)
 
     args = parser.parse_args(argv)
     try:
