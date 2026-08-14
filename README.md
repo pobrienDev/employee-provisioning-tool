@@ -46,7 +46,7 @@ one reviewed command.
 |-------|-------|-------|
 | 1 | Client-credentials auth, list users | **done** |
 | 2 | `discover` lookup, collision-checked `new`, `reuse` with password reset + session revocation | **done** |
-| 3 | License assignment + property/role group membership | planned |
+| 3 | License assignment + property group membership (`skus` helper) | **done** |
 | 4 | Offboarding: disable, strip groups and license | planned |
 | 5 | `--dry-run`, audit logging, per-hire checklist, login-info email draft | planned |
 | 6 | Ticketing-system integration (pull form fields automatically) | stretch |
@@ -71,15 +71,20 @@ one reviewed command.
    client (application) ID, and client secret from the app registration.
 
 4. **Config:** copy `config.example.yaml` to `config.yaml` and fill in the
-   tenant domain and the role-account prefixes used at your properties.
+   tenant domain, the role-account prefixes used at your properties, the
+   license SKU to assign (`python provision.py skus` lists the IDs; leave
+   blank in a tenant with no licenses and the step is skipped), and the
+   property number → group ID mappings.
 
-Two optional permissions unlock extras:
+Optional permissions unlock extras:
 
 - `User-PasswordProfile.ReadWrite.All` — required for the password reset in
   `reuse` (app-only password changes aren't covered by `User.ReadWrite.All`;
   without it, `reuse` stops cleanly before changing anything).
 - `AuditLog.Read.All` (plus an Entra ID P1 license) — lets `discover` show
   last sign-in times; without it the column is skipped.
+- `Organization.Read.All` — lets `skus` list the tenant's license SKUs and
+  their IDs.
 
 ## Usage
 
@@ -93,6 +98,7 @@ python provision.py new                   # fresh account for the hire in hire.y
 python provision.py new --upn tsmith2     # ...with an explicit UPN
 python provision.py reuse                 # hand reuse_upn's account to the hire
 python provision.py reuse --upn manager619
+python provision.py skus                  # license SKU IDs for config.yaml
 ```
 
 `new` builds the UPN from first initial + last name, refuses to overwrite an
@@ -101,12 +107,19 @@ user with a temporary must-change password. `reuse` locks the departed
 employee out first — password reset, then session revocation — before
 renaming and re-enabling the account for the new hire.
 
+After either path, the tool assigns the configured license (skipped with a
+note when `license_sku` is blank) and joins the account to the groups mapped
+to the hire's property, reporting each group by name and treating an
+already-present membership as fine. Transient Graph throttling and
+concurrency errors are retried automatically.
+
 `hire.yaml` (git-ignored) carries the current hire's details:
 
 ```yaml
 first_name: Taylor
 last_name: Example
 title: Property Manager
+property_number: 619
 property_name: Example Apartments
 # reuse mode only — the role account being handed over:
 reuse_upn: manager619

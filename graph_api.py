@@ -100,15 +100,35 @@ class GraphClient:
         url = path if path.startswith("https://") else f"{GRAPH_BASE}{path}"
         headers = kwargs.pop("headers", {})
         headers["Authorization"] = f"Bearer {self._get_token()}"
-        try:
-            response = self.session.request(
-                method, url, headers=headers, timeout=30, **kwargs
-            )
-        except requests.RequestException as exc:
-            raise GraphError(f"{method} {url} failed: {exc}") from exc
+        for attempt in range(3):
+            try:
+                response = self.session.request(
+                    method, url, headers=headers, timeout=30, **kwargs
+                )
+            except requests.RequestException as exc:
+                raise GraphError(f"{method} {url} failed: {exc}") from exc
+            if attempt < 2 and self._transient(response):
+                try:
+                    delay = int(response.headers.get("Retry-After", ""))
+                except ValueError:
+                    delay = 2 * (attempt + 1)
+                time.sleep(max(delay, 1))
+                continue
+            break
         if response.status_code >= 400:
             raise GraphError(self._error_message(response), status=response.status_code)
         return response
+
+    @staticmethod
+    def _transient(response):
+        """True for throttling/outage responses Graph tells clients to retry."""
+        if response.status_code in (429, 503, 504):
+            return True
+        # Rapid writes to the same directory object can collide transiently.
+        return (
+            response.status_code == 409
+            and "Directory_ConcurrencyViolation" in response.text
+        )
 
     @staticmethod
     def _error_message(response):
@@ -161,3 +181,26 @@ class GraphClient:
     def revoke_sessions(self, user_id):
         """Invalidate the user's sign-in sessions and refresh tokens."""
         self._request("POST", f"/users/{user_id}/revokeSignInSessions")
+
+    def assign_license(self, user_id, sku_id):
+        """Assign a license SKU to the user (account needs a usageLocation)."""
+        payload = {"addLicenses": [{"skuId": sku_id}], "removeLicenses": []}
+        self._request("POST", f"/users/{user_id}/assignLicense", json=payload)
+
+    def list_skus(self):
+        """Return the tenant's subscribed license SKUs."""
+        return self._request("GET", "/subscribedSkus").json().get("value", [])
+
+    def get_group(self, group_id, select="displayName"):
+        """Return a group, or None if no such group exists."""
+        try:
+            return self._request("GET", f"/groups/{group_id}?$select={select}").json()
+        except GraphError as exc:
+            if exc.status == 404:
+                return None
+            raise
+
+    def add_group_member(self, group_id, user_id):
+        """Add the user to a group."""
+        payload = {"@odata.id": f"{GRAPH_BASE}/directoryObjects/{user_id}"}
+        self._request("POST", f"/groups/{group_id}/members/$ref", json=payload)

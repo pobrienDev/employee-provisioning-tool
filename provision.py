@@ -91,6 +91,63 @@ def tenant_domain(config, required=True):
     return domain
 
 
+def provision_extras(client, config, hire, user_id):
+    """License and property-group membership, shared by new and reuse."""
+    sku = config.get("license_sku")
+    if sku:
+        client.assign_license(user_id, sku)
+        print("  license assigned")
+    else:
+        print("  license skipped — no license_sku in config.yaml")
+
+    prop = str(hire.get("property_number") or "")
+    if not prop:
+        print("  groups skipped — no property_number in hire.yaml")
+        return
+    properties = {str(k): v for k, v in (config.get("properties") or {}).items()}
+    mapping = properties.get(prop)
+    if not isinstance(mapping, dict) or not mapping.get("groups"):
+        print(f"  groups skipped — property {prop} has no groups in config.yaml")
+        return
+
+    for group_id in mapping["groups"]:
+        group = client.get_group(group_id)
+        label = (group or {}).get("displayName") or group_id
+        if group is None:
+            print(f"  group {group_id} not found — check config.yaml")
+            continue
+        try:
+            client.add_group_member(group_id, user_id)
+            print(f"  added to group: {label}")
+        except GraphError as exc:
+            if exc.status == 400 and "already exist" in str(exc):
+                print(f"  already in group: {label}")
+            else:
+                raise
+
+
+def cmd_skus(args):
+    client = GraphClient.from_env()
+    try:
+        skus = client.list_skus()
+    except GraphError as exc:
+        if exc.status == 403:
+            raise ProvisionError(
+                "listing licenses needs the Organization.Read.All application "
+                "permission (admin-consented)"
+            ) from exc
+        raise
+    if not skus:
+        print("No license SKUs in this tenant.")
+        return
+    print(f"{len(skus)} SKU(s):\n")
+    for sku in skus:
+        enabled = (sku.get("prepaidUnits") or {}).get("enabled", 0)
+        used = sku.get("consumedUnits", 0)
+        part = sku.get("skuPartNumber") or "?"
+        print(f"  {part:<32}  {sku.get('skuId')}  ({used}/{enabled} used)")
+
+
 def cmd_list_users(args):
     client = GraphClient.from_env()
     users = client.list_users()
@@ -218,7 +275,7 @@ def cmd_new(args):
         raise
     print(f"Created {display_name}  ({created.get('userPrincipalName', upn)})")
     print(f"  temp password: {password}  (must change at first sign-in)")
-    print("  license + groups come in Phase 3 — assign manually for now.")
+    provision_extras(client, config, hire, created["id"])
 
 
 def cmd_reuse(args):
@@ -267,6 +324,8 @@ def cmd_reuse(args):
         "displayName": f"{hire['first_name']} {hire['last_name']}",
         "givenName": hire["first_name"],
         "surname": hire["last_name"],
+        # assignLicense requires a usageLocation; older role accounts may lack one
+        "usageLocation": (config.get("tenant") or {}).get("usage_location", "US"),
     }
     if hire.get("title"):
         changes["jobTitle"] = hire["title"]
@@ -275,6 +334,7 @@ def cmd_reuse(args):
     print(f"  now: {changes['displayName']} — password reset, sessions revoked, account enabled")
     print(f"  temp password: {password}  (must change at first sign-in)")
     print("  mailbox history stays with the role account.")
+    provision_extras(client, config, hire, user["id"])
 
 
 def main(argv=None):
@@ -308,6 +368,11 @@ def main(argv=None):
     )
     reuse.add_argument("--upn", help="role account to reuse (defaults to reuse_upn in hire.yaml)")
     reuse.set_defaults(func=cmd_reuse)
+
+    skus = subparsers.add_parser(
+        "skus", help="list license SKUs and their IDs (for license_sku in config.yaml)"
+    )
+    skus.set_defaults(func=cmd_skus)
 
     args = parser.parse_args(argv)
     try:

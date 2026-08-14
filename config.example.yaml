@@ -9,4 +9,14 @@ naming:
   # Role-account prefixes that `discover <property number>` checks, e.g. manager619
   roles: [manager, assistant, leasing, maintenance]
 
-# Phase 3 adds: license SKU ID + property -> group ID mappings
+# License SKU assigned by new/reuse — find IDs with: python provision.py skus
+# Leave blank (or omit) to skip license assignment, e.g. in a dev tenant with no licenses.
+license_sku: ""
+
+# Property number -> groups the provisioned account joins
+properties:
+  "101":
+    name: Example Apartments
+    groups:
+      - "00000000-0000-0000-0000-000000000001"  # All Staff
+      - "00000000-0000-0000-0000-000000000002"  # Property 101 distribution list
