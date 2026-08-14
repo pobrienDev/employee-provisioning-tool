@@ -48,7 +48,7 @@ one reviewed command.
 | 2 | `discover` lookup, collision-checked `new`, `reuse` with password reset + session revocation | **done** |
 | 3 | License assignment + property group membership (`skus` helper) | **done** |
 | 4 | Offboarding: `terminate` — disable, revoke sessions, strip groups and licenses | **done** |
-| 5 | `--dry-run`, audit logging, per-hire checklist, login-info email draft | planned |
+| 5 | `--dry-run`, audit logging, per-hire checklist, login-info email draft | **done** |
 | 6 | Ticketing-system integration (pull form fields automatically) | stretch |
 
 ## Setup
@@ -101,7 +101,14 @@ python provision.py reuse --upn manager619
 python provision.py skus                  # license SKU IDs for config.yaml
 python provision.py terminate manager619        # preview the offboarding plan
 python provision.py terminate manager619 --yes  # actually offboard
+python provision.py new --dry-run               # rehearse any write command
 ```
+
+`new`, `reuse`, and `terminate` all take `--dry-run`: reads still hit the API
+so the output is realistic (real group names, real collision checks), but
+every write becomes a `[dry-run] would ...` line. Every action — real or
+dry-run — is appended to `logs/provision-<date>.log` with a timestamp;
+passwords and personal contact details never go in the log.
 
 `new` builds the UPN from first initial + last name, refuses to overwrite an
 existing account (suggesting available alternates instead), and creates the
@@ -122,6 +129,10 @@ destructive path always requires the flag. Converting the mailbox to shared
 (if mail must be retained) is printed as a manual follow-up, since that is an
 Exchange operation outside the Graph v1.0 API.
 
+After provisioning, the tool prints the manual checklist of non-M365
+platforms marked on the form and a ready-to-paste login-info email (CC'ing
+the RPM when the form asks) — shown once, never saved to disk.
+
 `hire.yaml` (git-ignored) carries the current hire's details:
 
 ```yaml
@@ -132,4 +143,15 @@ property_number: 619
 property_name: Example Apartments
 # reuse mode only — the role account being handed over:
 reuse_upn: manager619
+
+# where the login info goes, and whether to CC the RPM
+login_info_email: manager619@example.com
+copy_rpm: yes
+rpm_email: rpm@example.com
+
+# non-M365 platforms marked on the form — printed as a manual checklist
+platforms:
+  yardi: yes
+  happyco: no
+  rent_cafe: yes
 ```

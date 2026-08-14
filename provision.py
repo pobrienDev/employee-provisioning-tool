@@ -7,6 +7,13 @@ Commands:
   discover manager619   accounts matching a UPN prefix
   new                   create a fresh account for the hire in hire.yaml
   reuse                 hand an existing role account to the hire in hire.yaml
+  terminate <upn>       offboard: disable, revoke sessions, strip groups/licenses
+  skus                  list license SKU IDs for config.yaml
+
+new, reuse, and terminate accept --dry-run: reads still hit the API so the
+output is realistic, but every write is replaced with a "[dry-run] would ..."
+line. Every action is appended to logs/provision-<date>.log — actions only,
+never passwords or personal contact details.
 """
 
 import argparse
@@ -14,6 +21,7 @@ import secrets
 import string
 import sys
 import unicodedata
+from datetime import datetime
 from pathlib import Path
 
 import yaml
@@ -21,11 +29,30 @@ import yaml
 from graph_api import ConfigError, GraphClient, GraphError
 
 BASE_DIR = Path(__file__).parent
+LOG_DIR = BASE_DIR / "logs"
 USER_FIELDS = "id,displayName,userPrincipalName,accountEnabled,jobTitle,officeLocation"
 
 
 class ProvisionError(Exception):
     """A provisioning step can't proceed; the message says why."""
+
+
+def audit(message):
+    """Append a timestamped line to today's audit log.
+
+    Actions only — passwords and personal contact details never go in.
+    """
+    LOG_DIR.mkdir(exist_ok=True)
+    now = datetime.now()
+    path = LOG_DIR / f"provision-{now:%Y-%m-%d}.log"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{now:%Y-%m-%d %H:%M:%S}  {message}\n")
+
+
+def act(message):
+    """Print an action line and record it in the audit log."""
+    print(f"  {message}")
+    audit(message)
 
 
 def load_yaml(name, hint):
@@ -91,61 +118,112 @@ def tenant_domain(config, required=True):
     return domain
 
 
-def provision_extras(client, config, hire, user_id):
-    """License and property-group membership, shared by new and reuse."""
+def sanitize_local(text):
+    """Reduce a name fragment to the ASCII letters/digits a UPN allows."""
+    ascii_text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+    return "".join(ch for ch in ascii_text if ch.isalnum()).lower()
+
+
+def build_upn(hire, config, override):
+    domain = tenant_domain(config)
+    if override:
+        return override if "@" in override else f"{override}@{domain}"
+    local = sanitize_local(hire["first_name"][:1] + hire["last_name"])
+    if not local:
+        raise ProvisionError("could not build a UPN from the hire's name — pass --upn")
+    return f"{local}@{domain}"
+
+
+def provision_extras(client, config, hire, user_id, dry):
+    """License and property-group membership, shared by new and reuse.
+
+    Returns a list of issues rather than raising, so one failure doesn't
+    abandon the remaining steps.
+    """
+    issues = []
+
     sku = config.get("license_sku")
-    if sku:
-        client.assign_license(user_id, sku)
-        print("  license assigned")
+    if not sku:
+        act("license skipped — no license_sku in config.yaml")
+    elif dry:
+        act(f"[dry-run] would assign license {sku}")
     else:
-        print("  license skipped — no license_sku in config.yaml")
+        try:
+            client.assign_license(user_id, sku)
+            act("license assigned")
+        except GraphError as exc:
+            if "available licenses" in str(exc):
+                msg = "license not assigned — no seats left on the configured SKU"
+            else:
+                msg = f"license not assigned — {exc}"
+            act(msg)
+            issues.append(msg)
 
     prop = str(hire.get("property_number") or "")
     if not prop:
-        print("  groups skipped — no property_number in hire.yaml")
-        return
+        act("groups skipped — no property_number in hire.yaml")
+        return issues
     properties = {str(k): v for k, v in (config.get("properties") or {}).items()}
     mapping = properties.get(prop)
     if not isinstance(mapping, dict) or not mapping.get("groups"):
-        print(f"  groups skipped — property {prop} has no groups in config.yaml")
-        return
+        act(f"groups skipped — property {prop} has no groups in config.yaml")
+        return issues
 
     for group_id in mapping["groups"]:
         group = client.get_group(group_id)
-        label = (group or {}).get("displayName") or group_id
         if group is None:
-            print(f"  group {group_id} not found — check config.yaml")
+            msg = f"group {group_id} not found — check config.yaml"
+            act(msg)
+            issues.append(msg)
+            continue
+        label = group.get("displayName") or group_id
+        if dry:
+            act(f"[dry-run] would add to group: {label}")
             continue
         try:
             client.add_group_member(group_id, user_id)
-            print(f"  added to group: {label}")
+            act(f"added to group: {label}")
         except GraphError as exc:
             if exc.status == 400 and "already exist" in str(exc):
-                print(f"  already in group: {label}")
+                act(f"already in group: {label}")
             else:
-                raise
+                msg = f"could not add to {label}: {exc}"
+                act(msg)
+                issues.append(msg)
+    return issues
 
 
-def cmd_skus(args):
-    client = GraphClient.from_env()
-    try:
-        skus = client.list_skus()
-    except GraphError as exc:
-        if exc.status == 403:
-            raise ProvisionError(
-                "listing licenses needs the Organization.Read.All application "
-                "permission (admin-consented)"
-            ) from exc
-        raise
-    if not skus:
-        print("No license SKUs in this tenant.")
+def checklist(hire):
+    """Reminder list of the non-M365 platforms marked yes on the form."""
+    platforms = hire.get("platforms")
+    if not isinstance(platforms, dict):
         return
-    print(f"{len(skus)} SKU(s):\n")
-    for sku in skus:
-        enabled = (sku.get("prepaidUnits") or {}).get("enabled", 0)
-        used = sku.get("consumedUnits", 0)
-        part = sku.get("skuPartNumber") or "?"
-        print(f"  {part:<32}  {sku.get('skuId')}  ({used}/{enabled} used)")
+    needed = [str(name) for name, wanted in platforms.items() if wanted]
+    if needed:
+        act("manual checklist — accounts still to create: " + ", ".join(needed))
+
+
+def email_draft(hire, display_name, upn, password):
+    """Print a ready-to-paste login-info email. Shown once, never saved."""
+    to = hire.get("login_info_email")
+    if not to:
+        return
+    cc = hire.get("rpm_email") if hire.get("copy_rpm") else None
+
+    print("\n--- login-info email draft (copy into your mail client; not sent, not saved) ---")
+    print(f"To: {to}")
+    if cc:
+        print(f"Cc: {cc}")
+    print(f"Subject: Login details for {display_name}")
+    print()
+    print(f"{display_name}'s account is ready.")
+    print()
+    print(f"  Username:           {upn}")
+    print(f"  Temporary password: {password or '(generated at the real run)'}")
+    print()
+    print("They'll be prompted to choose a new password at first sign-in.")
+    print("--- end draft ---")
+    audit(f"login-info email drafted for {upn}" + (" (cc RPM)" if cc else ""))
 
 
 def cmd_list_users(args):
@@ -199,27 +277,35 @@ def cmd_discover(args):
         print("\n(last sign-in unavailable — needs AuditLog.Read.All and an Entra ID P1 license)")
 
 
-def sanitize_local(text):
-    """Reduce a name fragment to the ASCII letters/digits a UPN allows."""
-    ascii_text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
-    return "".join(ch for ch in ascii_text if ch.isalnum()).lower()
-
-
-def build_upn(hire, config, override):
-    domain = tenant_domain(config)
-    if override:
-        return override if "@" in override else f"{override}@{domain}"
-    local = sanitize_local(hire["first_name"][:1] + hire["last_name"])
-    if not local:
-        raise ProvisionError("could not build a UPN from the hire's name — pass --upn")
-    return f"{local}@{domain}"
+def cmd_skus(args):
+    client = GraphClient.from_env()
+    try:
+        skus = client.list_skus()
+    except GraphError as exc:
+        if exc.status == 403:
+            raise ProvisionError(
+                "listing licenses needs the Organization.Read.All application "
+                "permission (admin-consented)"
+            ) from exc
+        raise
+    if not skus:
+        print("No license SKUs in this tenant.")
+        return
+    print(f"{len(skus)} SKU(s):\n")
+    for sku in skus:
+        enabled = (sku.get("prepaidUnits") or {}).get("enabled", 0)
+        used = sku.get("consumedUnits", 0)
+        part = sku.get("skuPartNumber") or "?"
+        print(f"  {part:<32}  {sku.get('skuId')}  ({used}/{enabled} used)")
 
 
 def cmd_new(args):
     config = load_config()
     hire = load_hire()
     client = GraphClient.from_env()
+    dry = args.dry_run
     upn = build_upn(hire, config, args.upn)
+    audit(f"new: {upn}{' (dry-run)' if dry else ''}")
 
     existing = client.get_user(upn, USER_FIELDS)
     if existing:
@@ -241,47 +327,59 @@ def cmd_new(args):
                 print(f"  {candidate}")
         raise ProvisionError("pick a UPN and re-run with --upn")
 
-    password = temp_password()
     display_name = f"{hire['first_name']} {hire['last_name']}"
-    payload = {
-        "accountEnabled": True,
-        "displayName": display_name,
-        "givenName": hire["first_name"],
-        "surname": hire["last_name"],
-        "userPrincipalName": upn,
-        "mailNickname": upn.split("@", 1)[0],
-        "usageLocation": (config.get("tenant") or {}).get("usage_location", "US"),
-        "passwordProfile": {
-            "password": password,
-            "forceChangePasswordNextSignIn": True,
-        },
-    }
-    if hire.get("title"):
-        payload["jobTitle"] = hire["title"]
-    if hire.get("property_name"):
-        payload["officeLocation"] = hire["property_name"]
+    if dry:
+        act(f"[dry-run] would create {display_name} ({upn}) with a temporary must-change password")
+        password = None
+        user_id = None
+    else:
+        password = temp_password()
+        payload = {
+            "accountEnabled": True,
+            "displayName": display_name,
+            "givenName": hire["first_name"],
+            "surname": hire["last_name"],
+            "userPrincipalName": upn,
+            "mailNickname": upn.split("@", 1)[0],
+            "usageLocation": (config.get("tenant") or {}).get("usage_location", "US"),
+            "passwordProfile": {
+                "password": password,
+                "forceChangePasswordNextSignIn": True,
+            },
+        }
+        if hire.get("title"):
+            payload["jobTitle"] = hire["title"]
+        if hire.get("property_name"):
+            payload["officeLocation"] = hire["property_name"]
 
-    try:
-        created = client.create_user(payload)
-    except GraphError as exc:
-        if exc.status == 400 and "userPrincipalName already exists" in str(exc):
-            # The pre-check can miss an account created seconds ago — the
-            # directory lags a little before new UPNs are readable.
-            raise ProvisionError(
-                f"{upn} already exists — if it was just created, the directory "
-                "can lag a few seconds; re-run to see it, or pick another UPN "
-                "with --upn"
-            ) from exc
-        raise
-    print(f"Created {display_name}  ({created.get('userPrincipalName', upn)})")
-    print(f"  temp password: {password}  (must change at first sign-in)")
-    provision_extras(client, config, hire, created["id"])
+        try:
+            created = client.create_user(payload)
+        except GraphError as exc:
+            if exc.status == 400 and "userPrincipalName already exists" in str(exc):
+                # The pre-check can miss an account created seconds ago — the
+                # directory lags a little before new UPNs are readable.
+                raise ProvisionError(
+                    f"{upn} already exists — if it was just created, the directory "
+                    "can lag a few seconds; re-run to see it, or pick another UPN "
+                    "with --upn"
+                ) from exc
+            raise
+        act(f"created {display_name} ({created.get('userPrincipalName', upn)})")
+        print(f"  temp password: {password}  (must change at first sign-in)")
+        user_id = created["id"]
+
+    issues = provision_extras(client, config, hire, user_id, dry)
+    checklist(hire)
+    email_draft(hire, display_name, upn, password)
+    if issues:
+        raise ProvisionError("completed with issues: " + "; ".join(issues))
 
 
 def cmd_reuse(args):
     config = load_config()
     hire = load_hire()
     client = GraphClient.from_env()
+    dry = args.dry_run
 
     target = args.upn or hire.get("reuse_upn")
     if not target:
@@ -290,6 +388,7 @@ def cmd_reuse(args):
         )
     domain = tenant_domain(config, required=False)
     upn = target if "@" in target or not domain else f"{target}@{domain}"
+    audit(f"reuse: {upn}{' (dry-run)' if dry else ''}")
 
     user = client.get_user(upn, USER_FIELDS)
     if not user:
@@ -298,60 +397,90 @@ def cmd_reuse(args):
     old_status = "enabled" if user.get("accountEnabled") else "disabled"
     print(f"Reusing {upn} (was: {user.get('displayName')}, {old_status})")
 
-    # Lock the departed employee out first: new password, then kill sessions.
-    # If the password step is denied, nothing has been changed yet.
-    password = temp_password()
-    try:
-        client.update_user(user["id"], {
-            "passwordProfile": {
-                "password": password,
-                "forceChangePasswordNextSignIn": True,
-            },
-        })
-    except GraphError as exc:
-        if exc.status == 403:
-            raise ProvisionError(
-                "password reset was denied — app-only password changes need the "
-                "User-PasswordProfile.ReadWrite.All application permission "
-                "(admin-consented); User.ReadWrite.All alone doesn't cover them. "
-                "Nothing was changed."
-            ) from exc
-        raise
-    client.revoke_sessions(user["id"])
+    display_name = f"{hire['first_name']} {hire['last_name']}"
+    if dry:
+        act(
+            f"[dry-run] would reset the password, revoke sessions, rename to "
+            f"{display_name}, and enable the account"
+        )
+        password = None
+    else:
+        # Lock the departed employee out first: new password, then kill
+        # sessions. If the password step is denied, nothing has changed yet.
+        password = temp_password()
+        try:
+            client.update_user(user["id"], {
+                "passwordProfile": {
+                    "password": password,
+                    "forceChangePasswordNextSignIn": True,
+                },
+            })
+        except GraphError as exc:
+            if exc.status == 403:
+                raise ProvisionError(
+                    "password reset was denied — app-only password changes need the "
+                    "User-PasswordProfile.ReadWrite.All application permission "
+                    "(admin-consented); User.ReadWrite.All alone doesn't cover them. "
+                    "Nothing was changed."
+                ) from exc
+            raise
+        client.revoke_sessions(user["id"])
 
-    changes = {
-        "accountEnabled": True,
-        "displayName": f"{hire['first_name']} {hire['last_name']}",
-        "givenName": hire["first_name"],
-        "surname": hire["last_name"],
-        # assignLicense requires a usageLocation; older role accounts may lack one
-        "usageLocation": (config.get("tenant") or {}).get("usage_location", "US"),
-    }
-    if hire.get("title"):
-        changes["jobTitle"] = hire["title"]
-    client.update_user(user["id"], changes)
+        changes = {
+            "accountEnabled": True,
+            "displayName": display_name,
+            "givenName": hire["first_name"],
+            "surname": hire["last_name"],
+            # assignLicense requires a usageLocation; older role accounts may lack one
+            "usageLocation": (config.get("tenant") or {}).get("usage_location", "US"),
+        }
+        if hire.get("title"):
+            changes["jobTitle"] = hire["title"]
+        client.update_user(user["id"], changes)
 
-    print(f"  now: {changes['displayName']} — password reset, sessions revoked, account enabled")
-    print(f"  temp password: {password}  (must change at first sign-in)")
-    print("  mailbox history stays with the role account.")
-    provision_extras(client, config, hire, user["id"])
+        act(f"now: {display_name} — password reset, sessions revoked, account enabled")
+        print(f"  temp password: {password}  (must change at first sign-in)")
+        print("  mailbox history stays with the role account.")
+
+    issues = provision_extras(client, config, hire, user["id"], dry)
+    checklist(hire)
+    email_draft(hire, display_name, upn, password)
+    if issues:
+        raise ProvisionError("completed with issues: " + "; ".join(issues))
 
 
 def cmd_terminate(args):
     config = load_config()
     client = GraphClient.from_env()
+    dry = args.dry_run
     domain = tenant_domain(config, required=False)
     upn = args.upn if "@" in args.upn or not domain else f"{args.upn}@{domain}"
+    audit(f"terminate: {upn}{' (dry-run)' if dry else ''}")
 
     user = client.get_user(upn, USER_FIELDS + ",assignedLicenses")
     if not user:
-        raise ProvisionError(f"{upn} not found")
+        raise ProvisionError(
+            f"{upn} not found — note that accounts created moments ago can "
+            "take a few seconds to become visible"
+        )
 
     groups = client.get_member_groups(user["id"])
     licenses = [lic["skuId"] for lic in user.get("assignedLicenses") or []]
 
     print("Terminating:")
     print_user(user)
+
+    if dry:
+        act("[dry-run] would disable the account and revoke every session")
+        for group in groups:
+            act(f"[dry-run] would remove from group: {group.get('displayName') or group['id']}")
+        if licenses:
+            act(f"[dry-run] would remove {len(licenses)} license(s)")
+        else:
+            act("no licenses to remove")
+        print("  manual step if mail must be retained: convert the mailbox to shared (Exchange admin center)")
+        return
+
     print(
         f"  plan: disable account, revoke sessions, remove "
         f"{len(groups)} group membership(s), remove {len(licenses)} license(s)"
@@ -362,23 +491,23 @@ def cmd_terminate(args):
     # Lock out first, then clean up.
     client.update_user(user["id"], {"accountEnabled": False})
     client.revoke_sessions(user["id"])
-    print("  account disabled, sessions revoked")
+    act("account disabled, sessions revoked")
 
     failed = []
     for group in groups:
         label = group.get("displayName") or group["id"]
         try:
             client.remove_group_member(group["id"], user["id"])
-            print(f"  removed from group: {label}")
+            act(f"removed from group: {label}")
         except GraphError as exc:
             failed.append(label)
-            print(f"  could not remove from {label}: {exc}")
+            act(f"could not remove from {label}: {exc}")
 
     if licenses:
         client.remove_licenses(user["id"], licenses)
-        print(f"  removed {len(licenses)} license(s)")
+        act(f"removed {len(licenses)} license(s)")
     else:
-        print("  no licenses to remove")
+        act("no licenses to remove")
 
     print("  manual step if mail must be retained: convert the mailbox to shared (Exchange admin center)")
     if failed:
@@ -411,12 +540,20 @@ def main(argv=None):
         "new", help="create a fresh account for the hire in hire.yaml"
     )
     new.add_argument("--upn", help="override the default first-initial+last-name UPN")
+    new.add_argument(
+        "--dry-run", action="store_true",
+        help="print what would happen without changing anything",
+    )
     new.set_defaults(func=cmd_new)
 
     reuse = subparsers.add_parser(
         "reuse", help="hand an existing role account to the hire in hire.yaml"
     )
     reuse.add_argument("--upn", help="role account to reuse (defaults to reuse_upn in hire.yaml)")
+    reuse.add_argument(
+        "--dry-run", action="store_true",
+        help="print what would happen without changing anything",
+    )
     reuse.set_defaults(func=cmd_reuse)
 
     skus = subparsers.add_parser(
@@ -432,6 +569,10 @@ def main(argv=None):
         "--yes", action="store_true",
         help="actually offboard; without it the command only previews the plan",
     )
+    terminate.add_argument(
+        "--dry-run", action="store_true",
+        help="print what would happen without changing anything",
+    )
     terminate.set_defaults(func=cmd_terminate)
 
     args = parser.parse_args(argv)
@@ -440,6 +581,7 @@ def main(argv=None):
     except (ConfigError, GraphError, ProvisionError) as exc:
         sys.stdout.flush()  # keep any printed detail ahead of the error line
         print(f"error: {exc}", file=sys.stderr)
+        audit(f"error ({args.command}): {exc}")
         return 1
     return 0
 
