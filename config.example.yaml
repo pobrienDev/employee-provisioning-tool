@@ -7,6 +7,6 @@ tenant:
 
 naming:
   # Role-account prefixes that `discover <property number>` checks, e.g. manager619
-  roles: [manager, assistant, maintenance]
+  roles: [manager, assistant, leasing, maintenance]
 
 # Phase 3 adds: license SKU ID + property -> group ID mappings
