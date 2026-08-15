@@ -47,7 +47,7 @@ one reviewed command.
 | 1 | Client-credentials auth, list users | **done** |
 | 2 | `discover` lookup, collision-checked `new`, `reuse` with password reset + session revocation | **done** |
 | 3 | License assignment + property group membership (`skus` helper) | **done** |
-| 4 | Offboarding: `terminate` — disable, revoke sessions, reset MFA, strip groups and licenses | **done** |
+| 4 | Offboarding: `terminate` — disable, revoke sessions, strip groups and licenses | **done** |
 | 5 | `--dry-run`, audit logging, per-hire checklist, login-info email draft | **done** |
 | 6 | Ticketing-system integration (pull form fields automatically) | stretch |
 
@@ -85,10 +85,10 @@ Optional permissions unlock extras:
   last sign-in times; without it the column is skipped.
 - `Organization.Read.All` — lets `skus` list the tenant's license SKUs and
   their IDs.
-- `UserAuthenticationMethod.ReadWrite.All` — lets `reuse` and `terminate`
-  remove the previous holder's registered MFA methods (phone, Authenticator,
-  security keys) so the next owner enrolls fresh; without it the step is
-  skipped with a note.
+- `UserAuthenticationMethod.ReadWrite.All` — lets `reuse` remove the
+  previous holder's registered MFA methods (phone, Authenticator, security
+  keys) so the new hire enrolls fresh; without it the step is skipped with a
+  note.
 
 ## Usage
 
@@ -128,8 +128,7 @@ already-present membership as fine. Transient Graph throttling and
 concurrency errors are retried automatically.
 
 `terminate` offboards in lockout-first order: disable the account and revoke
-every session, then remove registered MFA methods, all group memberships,
-and licenses. Without
+every session, then remove all group memberships and licenses. Without
 `--yes` it only prints who would be offboarded and what would happen — the
 destructive path always requires the flag. Converting the mailbox to shared
 (if mail must be retained) is printed as a manual follow-up, since that is an

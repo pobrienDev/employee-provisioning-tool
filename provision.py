@@ -197,7 +197,9 @@ def reset_mfa(client, user_id, dry):
     """Remove the account's registered MFA methods (previous holder's phone,
     Authenticator, security keys) so the next owner enrolls fresh.
 
-    Returns a list of issues; a missing permission degrades to a note.
+    Used by reuse only: a terminated account is disabled outright, so its
+    registrations are left untouched. Returns a list of issues; a missing
+    permission degrades to a note.
     """
     try:
         methods = client.list_auth_methods(user_id)
@@ -512,7 +514,6 @@ def cmd_terminate(args):
 
     if dry:
         act("[dry-run] would disable the account and revoke every session")
-        reset_mfa(client, user["id"], dry=True)
         for group in groups:
             act(f"[dry-run] would remove from group: {group.get('displayName') or group['id']}")
         if licenses:
@@ -534,7 +535,7 @@ def cmd_terminate(args):
     client.revoke_sessions(user["id"])
     act("account disabled, sessions revoked")
 
-    issues = reset_mfa(client, user["id"], dry=False)
+    issues = []
     for group in groups:
         label = group.get("displayName") or group["id"]
         try:
