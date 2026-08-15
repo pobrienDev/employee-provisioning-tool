@@ -121,9 +121,12 @@ employee out first — password reset, then session revocation — then wipes
 their registered MFA methods so the new hire enrolls their own, before
 renaming and re-enabling the account.
 
-After either path, the tool assigns the configured license (skipped with a
-note when `license_sku` is blank) and joins the account to the groups mapped
-to the hire's property, reporting each group by name and treating an
+Either path stamps the hire's details onto the account's contact fields:
+title → Job title, property name → Office, property number → Department —
+so the admin center shows at a glance which property an account belongs to.
+The tool then assigns the configured license (skipped with a note when
+`license_sku` is blank) and joins the account to the groups mapped to the
+hire's property, reporting each group by name and treating an
 already-present membership as fine. Transient Graph throttling and
 concurrency errors are retried automatically.
 

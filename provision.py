@@ -392,6 +392,8 @@ def cmd_new(args):
             payload["jobTitle"] = hire["title"]
         if hire.get("property_name"):
             payload["officeLocation"] = hire["property_name"]
+        if hire.get("property_number"):
+            payload["department"] = str(hire["property_number"])
 
         try:
             created = client.create_user(payload)
@@ -477,6 +479,8 @@ def cmd_reuse(args):
         }
         if hire.get("title"):
             changes["jobTitle"] = hire["title"]
+        if hire.get("property_number"):
+            changes["department"] = str(hire["property_number"])
         client.update_user(user["id"], changes)
 
         act(f"now: {display_name} — password reset, sessions revoked, account enabled")
