@@ -114,9 +114,11 @@ every write becomes a `[dry-run] would ...` line. Every action — real or
 dry-run — is appended to `logs/provision-<date>.log` with a timestamp;
 passwords and personal contact details never go in the log.
 
-`new` builds the UPN from first initial + last name, refuses to overwrite an
-existing account (suggesting available alternates instead), and creates the
-user with a temporary must-change password. `reuse` locks the departed
+`new` builds the UPN from first initial + last name; if that's taken it
+automatically tries two letters of the first name, then three, and so on
+(numbered variants as a last resort), reporting each taken address and who
+holds it. An explicit `--upn` is never substituted — if it's taken, the run
+stops. The account is created with a temporary must-change password. `reuse` locks the departed
 employee out first — password reset, then session revocation — then wipes
 their registered MFA methods so the new hire enrolls their own, before
 renaming and re-enabling the account.

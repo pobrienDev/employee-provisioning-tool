@@ -124,14 +124,33 @@ def sanitize_local(text):
     return "".join(ch for ch in ascii_text if ch.isalnum()).lower()
 
 
-def build_upn(hire, config, override):
+def pick_upn(client, hire, config):
+    """Find the first available UPN for the hire's name.
+
+    Tries first initial + last name, then two letters of the first name,
+    three, and so on through the full first name; falls back to numbered
+    variants if every letter-based one is taken.
+    """
     domain = tenant_domain(config)
-    if override:
-        return override if "@" in override else f"{override}@{domain}"
-    local = sanitize_local(hire["first_name"][:1] + hire["last_name"])
-    if not local:
+    first = sanitize_local(hire["first_name"])
+    last = sanitize_local(hire["last_name"])
+    if not first and not last:
         raise ProvisionError("could not build a UPN from the hire's name — pass --upn")
-    return f"{local}@{domain}"
+    if first and last:
+        stems = [f"{first[:i]}{last}" for i in range(1, len(first) + 1)]
+    else:
+        stems = [first or last]
+    stems = list(dict.fromkeys(stems))
+    candidates = stems + [f"{stems[-1]}{n}" for n in range(2, 10)]
+
+    for local in candidates:
+        upn = f"{local}@{domain}"
+        existing = client.get_user(upn, "id,displayName")
+        if existing is None:
+            return upn
+        holder = existing.get("displayName") or "existing account"
+        print(f"  {upn} taken ({holder}) — trying next")
+    raise ProvisionError("no available UPN found after trying every variant — pass --upn")
 
 
 def provision_extras(client, config, hire, user_id, dry):
@@ -345,28 +364,19 @@ def cmd_new(args):
     hire = load_hire()
     client = GraphClient.from_env()
     dry = args.dry_run
-    upn = build_upn(hire, config, args.upn)
+    if args.upn:
+        # An explicit UPN is a decision, not a starting point — never
+        # silently substitute a different one for it.
+        domain = tenant_domain(config)
+        upn = args.upn if "@" in args.upn else f"{args.upn}@{domain}"
+        existing = client.get_user(upn, USER_FIELDS)
+        if existing:
+            print(f"{upn} already exists:")
+            print_user(existing)
+            raise ProvisionError("that UPN is taken — pick another with --upn")
+    else:
+        upn = pick_upn(client, hire, config)
     audit(f"new: {upn}{' (dry-run)' if dry else ''}")
-
-    existing = client.get_user(upn, USER_FIELDS)
-    if existing:
-        print(f"{upn} already exists:")
-        print_user(existing)
-        local, domain = upn.split("@", 1)
-        first2 = sanitize_local(hire["first_name"][:2])
-        first_full = sanitize_local(hire["first_name"])
-        last = sanitize_local(hire["last_name"])
-        candidates = dict.fromkeys(c for c in (
-            f"{first2}{last}@{domain}" if first2 and last else None,
-            f"{first_full}.{last}@{domain}" if first_full and last else None,
-            f"{local}2@{domain}",
-        ) if c)
-        available = [c for c in candidates if c != upn and not client.get_user(c, "id")]
-        if available:
-            print("Available alternates:")
-            for candidate in available:
-                print(f"  {candidate}")
-        raise ProvisionError("pick a UPN and re-run with --upn")
 
     display_name = f"{hire['first_name']} {hire['last_name']}"
     if dry:
