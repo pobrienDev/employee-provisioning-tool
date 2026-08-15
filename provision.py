@@ -26,7 +26,7 @@ from pathlib import Path
 
 import yaml
 
-from graph_api import ConfigError, GraphClient, GraphError
+from graph_api import AUTH_METHOD_PATHS, ConfigError, GraphClient, GraphError
 
 BASE_DIR = Path(__file__).parent
 LOG_DIR = BASE_DIR / "logs"
@@ -190,6 +190,45 @@ def provision_extras(client, config, hire, user_id, dry):
                 msg = f"could not add to {label}: {exc}"
                 act(msg)
                 issues.append(msg)
+    return issues
+
+
+def reset_mfa(client, user_id, dry):
+    """Remove the account's registered MFA methods (previous holder's phone,
+    Authenticator, security keys) so the next owner enrolls fresh.
+
+    Returns a list of issues; a missing permission degrades to a note.
+    """
+    try:
+        methods = client.list_auth_methods(user_id)
+    except GraphError as exc:
+        if exc.status == 403:
+            act(
+                "mfa reset skipped — needs the UserAuthenticationMethod."
+                "ReadWrite.All application permission (admin-consented)"
+            )
+            return []
+        raise
+
+    removable = [m for m in methods if m.get("@odata.type") in AUTH_METHOD_PATHS]
+    if not removable:
+        act("no registered mfa methods to remove")
+        return []
+    if dry:
+        act(f"[dry-run] would remove {len(removable)} registered mfa method(s)")
+        return []
+
+    issues = []
+    for method in removable:
+        path = AUTH_METHOD_PATHS[method["@odata.type"]]
+        label = path.removesuffix("Methods")
+        try:
+            client.delete_auth_method(user_id, path, method["id"])
+            act(f"removed mfa method: {label}")
+        except GraphError as exc:
+            msg = f"could not remove mfa method {label}: {exc}"
+            act(msg)
+            issues.append(msg)
     return issues
 
 
@@ -442,7 +481,8 @@ def cmd_reuse(args):
         print(f"  temp password: {password}  (must change at first sign-in)")
         print("  mailbox history stays with the role account.")
 
-    issues = provision_extras(client, config, hire, user["id"], dry)
+    issues = reset_mfa(client, user["id"], dry)
+    issues += provision_extras(client, config, hire, user["id"], dry)
     checklist(hire)
     email_draft(hire, display_name, upn, password)
     if issues:
@@ -472,6 +512,7 @@ def cmd_terminate(args):
 
     if dry:
         act("[dry-run] would disable the account and revoke every session")
+        reset_mfa(client, user["id"], dry=True)
         for group in groups:
             act(f"[dry-run] would remove from group: {group.get('displayName') or group['id']}")
         if licenses:
@@ -493,15 +534,16 @@ def cmd_terminate(args):
     client.revoke_sessions(user["id"])
     act("account disabled, sessions revoked")
 
-    failed = []
+    issues = reset_mfa(client, user["id"], dry=False)
     for group in groups:
         label = group.get("displayName") or group["id"]
         try:
             client.remove_group_member(group["id"], user["id"])
             act(f"removed from group: {label}")
         except GraphError as exc:
-            failed.append(label)
-            act(f"could not remove from {label}: {exc}")
+            msg = f"could not remove from {label}: {exc}"
+            act(msg)
+            issues.append(msg)
 
     if licenses:
         client.remove_licenses(user["id"], licenses)
@@ -510,10 +552,8 @@ def cmd_terminate(args):
         act("no licenses to remove")
 
     print("  manual step if mail must be retained: convert the mailbox to shared (Exchange admin center)")
-    if failed:
-        raise ProvisionError(
-            f"offboarding finished with issues — still a member of: {', '.join(failed)}"
-        )
+    if issues:
+        raise ProvisionError("offboarding finished with issues — " + "; ".join(issues))
 
 
 def main(argv=None):

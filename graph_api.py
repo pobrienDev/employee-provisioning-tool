@@ -19,6 +19,19 @@ from dotenv import load_dotenv
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 TOKEN_URL = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
 
+# Registered MFA method types -> the per-type endpoint used to delete them.
+# (passwordAuthenticationMethod is deliberately absent: passwords can't be
+# deleted, only reset.)
+AUTH_METHOD_PATHS = {
+    "#microsoft.graph.microsoftAuthenticatorAuthenticationMethod": "microsoftAuthenticatorMethods",
+    "#microsoft.graph.phoneAuthenticationMethod": "phoneMethods",
+    "#microsoft.graph.fido2AuthenticationMethod": "fido2Methods",
+    "#microsoft.graph.emailAuthenticationMethod": "emailMethods",
+    "#microsoft.graph.softwareOathAuthenticationMethod": "softwareOathMethods",
+    "#microsoft.graph.windowsHelloForBusinessAuthenticationMethod": "windowsHelloForBusinessMethods",
+    "#microsoft.graph.temporaryAccessPassAuthenticationMethod": "temporaryAccessPassMethods",
+}
+
 
 class ConfigError(Exception):
     """Required environment configuration is missing."""
@@ -226,3 +239,14 @@ class GraphClient:
         """Remove license SKUs from the user."""
         payload = {"addLicenses": [], "removeLicenses": sku_ids}
         self._request("POST", f"/users/{user_id}/assignLicense", json=payload)
+
+    def list_auth_methods(self, user_id):
+        """Return the user's registered authentication methods."""
+        url = f"/users/{user_id}/authentication/methods"
+        return self._request("GET", url).json().get("value", [])
+
+    def delete_auth_method(self, user_id, method_path, method_id):
+        """Delete one registered authentication method by its typed endpoint."""
+        self._request(
+            "DELETE", f"/users/{user_id}/authentication/{method_path}/{method_id}"
+        )
