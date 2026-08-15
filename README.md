@@ -1,14 +1,15 @@
 # Employee Provisioning Tool
 
 A Python command-line tool that automates employee onboarding and offboarding
-in Microsoft Entra ID through the Microsoft Graph API. It turns a new-hire
-form submission into account creation (or role-account reuse), license
-assignment, group membership, and credential delivery — and turns a
-termination into a clean, complete offboarding — with a dry-run mode and an
-audit log of every action taken.
+in Microsoft Entra ID through the Microsoft Graph API. It turns a Formstack
+"Employee Status Change" submission — which arrives as a Zendesk ticket —
+into account creation (or role-account reuse), license assignment, group
+membership, and credential delivery, and turns a termination into a clean,
+complete offboarding — with a dry-run mode and an audit log of every action
+taken.
 
 ```
-HR form submission  →  input file  →  provision.py  →  Graph API  →  Entra ID
+Formstack form (via Zendesk ticket)  →  hire.yaml  →  provision.py  →  Graph API  →  Entra ID
 ```
 
 Built for a multi-property organization where account setup was a manual,
@@ -49,7 +50,7 @@ one reviewed command.
 | 3 | License assignment + property group membership (`skus` helper) | **done** |
 | 4 | Offboarding: `terminate` — disable, revoke sessions, strip groups and licenses | **done** |
 | 5 | `--dry-run`, audit logging, per-hire checklist, login-info email draft | **done** |
-| 6 | Ticketing-system integration (pull form fields automatically) | stretch |
+| 6 | Zendesk integration (pull the Formstack fields from the ticket automatically) | stretch |
 
 ## Setup
 
@@ -143,7 +144,9 @@ After provisioning, the tool prints the manual checklist of non-M365
 platforms marked on the form and a ready-to-paste login-info email (CC'ing
 the RPM when the form asks) — shown once, never saved to disk.
 
-`hire.yaml` (git-ignored) carries the current hire's details:
+`hire.yaml` (git-ignored) carries the current hire's details, copied from
+the Formstack ticket's fields — about 30 seconds of copying that replaces
+the whole portal walk-through (until Phase 6 pulls them automatically):
 
 ```yaml
 first_name: Taylor
