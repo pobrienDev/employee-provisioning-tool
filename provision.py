@@ -124,6 +124,21 @@ def sanitize_local(text):
     return "".join(ch for ch in ascii_text if ch.isalnum()).lower()
 
 
+def display_name_for(hire, config):
+    """Role-style display name at properties, personal name at corporate.
+
+    Accounts at a property display as "{title} at {property name}"; the
+    corporate property (corporate_property in config.yaml, default "50")
+    keeps "First Last". Falls back to the personal name when title or
+    property name is missing.
+    """
+    prop = str(hire.get("property_number") or "")
+    corporate = str(config.get("corporate_property") or "50")
+    if prop and prop != corporate and hire.get("title") and hire.get("property_name"):
+        return f"{hire['title']} at {hire['property_name']}"
+    return f"{hire['first_name']} {hire['last_name']}"
+
+
 def pick_upn(client, hire, config):
     """Find the first available UPN for the hire's name.
 
@@ -378,7 +393,7 @@ def cmd_new(args):
         upn = pick_upn(client, hire, config)
     audit(f"new: {upn}{' (dry-run)' if dry else ''}")
 
-    display_name = f"{hire['first_name']} {hire['last_name']}"
+    display_name = display_name_for(hire, config)
     if dry:
         act(f"[dry-run] would create {display_name} ({upn}) with a temporary must-change password")
         password = None
@@ -423,7 +438,7 @@ def cmd_new(args):
 
     issues = provision_extras(client, config, hire, user_id, dry)
     checklist(hire)
-    email_draft(hire, display_name, upn, password)
+    email_draft(hire, f"{hire['first_name']} {hire['last_name']}", upn, password)
     if issues:
         raise ProvisionError("completed with issues: " + "; ".join(issues))
 
@@ -450,7 +465,7 @@ def cmd_reuse(args):
     old_status = "enabled" if user.get("accountEnabled") else "disabled"
     print(f"Reusing {upn} (was: {user.get('displayName')}, {old_status})")
 
-    display_name = f"{hire['first_name']} {hire['last_name']}"
+    display_name = display_name_for(hire, config)
     if dry:
         act(
             f"[dry-run] would reset the password, revoke sessions, rename to "
@@ -500,7 +515,7 @@ def cmd_reuse(args):
     issues = reset_mfa(client, user["id"], dry)
     issues += provision_extras(client, config, hire, user["id"], dry)
     checklist(hire)
-    email_draft(hire, display_name, upn, password)
+    email_draft(hire, f"{hire['first_name']} {hire['last_name']}", upn, password)
     if issues:
         raise ProvisionError("completed with issues: " + "; ".join(issues))
 

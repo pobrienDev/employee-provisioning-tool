@@ -9,6 +9,10 @@ naming:
   # Role-account prefixes that `discover <property number>` checks, e.g. manager619
   roles: [manager, assistant, leasing, maintenance]
 
+# Accounts at properties display as "{title} at {property name}"; accounts at
+# this property (the corporate office) keep a personal "First Last" name.
+corporate_property: "50"
+
 # License SKU assigned by new/reuse — find IDs with: python provision.py skus
 # Leave blank (or omit) to skip license assignment, e.g. in a dev tenant with no licenses.
 license_sku: ""

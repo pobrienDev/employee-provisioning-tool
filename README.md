@@ -127,6 +127,11 @@ renaming and re-enabling the account.
 Either path stamps the hire's details onto the account's contact fields:
 title → Job title, property name → Office, property number → Department —
 so the admin center shows at a glance which property an account belongs to.
+Display names follow the role-account convention: accounts at a property
+display as "{title} at {property name}" (e.g. "Property Manager at Example
+Apartments"), while accounts at the corporate office (`corporate_property`
+in `config.yaml`) keep a personal "First Last" name. The login-info email
+always addresses the person by name either way.
 The tool then assigns the configured license (skipped with a note when
 `license_sku` is blank) and joins the account to the groups mapped to the
 hire's property, reporting each group by name and treating an
