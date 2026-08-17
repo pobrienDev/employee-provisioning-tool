@@ -133,9 +133,13 @@ Apartments"), while accounts at the corporate office (`corporate_property`
 in `config.yaml`) keep a personal "First Last" name. The login-info email
 always addresses the person by name either way.
 The tool then assigns the configured license (skipped with a note when
-`license_sku` is blank) and joins the account to the groups mapped to the
-hire's property, reporting each group by name and treating an
-already-present membership as fine. Transient Graph throttling and
+`license_sku` is blank) and joins the account to every group the hire
+qualifies for, merged from three sources in `config.yaml`: the property's
+own groups, a corporate-or-field set (chosen by comparing the property
+number to `corporate_property`), and job-title groups (case-insensitive
+match under `groups.titles`). Each join is reported by group name, an
+already-present membership counts as fine, and duplicates across sources
+collapse. Transient Graph throttling and
 concurrency errors are retried automatically.
 
 `terminate` offboards in lockout-first order: disable the account and revoke

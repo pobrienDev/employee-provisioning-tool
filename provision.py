@@ -184,8 +184,39 @@ def pick_upn(client, hire, config):
     raise ProvisionError("no available UPN found after trying every variant — pass --upn")
 
 
+def groups_for(hire, config):
+    """Every group the hire should join, from three sources:
+
+    - the property's own groups (properties.<number>.groups)
+    - corporate or field membership (groups.corporate / groups.field,
+      chosen by comparing property_number to corporate_property)
+    - the job title (groups.titles, case-insensitive exact match)
+
+    Duplicates are collapsed, order preserved.
+    """
+    selected = []
+    prop = str(hire.get("property_number") or "")
+    corporate = str(config.get("corporate_property") or "50")
+    group_cfg = config.get("groups") or {}
+
+    if prop:
+        properties = {str(k): v for k, v in (config.get("properties") or {}).items()}
+        mapping = properties.get(prop)
+        if isinstance(mapping, dict):
+            selected += mapping.get("groups") or []
+        selected += group_cfg.get("corporate" if prop == corporate else "field") or []
+
+    title = (hire.get("title") or "").strip().lower()
+    if title:
+        for name, ids in (group_cfg.get("titles") or {}).items():
+            if str(name).strip().lower() == title:
+                selected += ids or []
+
+    return list(dict.fromkeys(selected))
+
+
 def provision_extras(client, config, hire, user_id, dry):
-    """License and property-group membership, shared by new and reuse.
+    """License and group membership, shared by new and reuse.
 
     Returns a list of issues rather than raising, so one failure doesn't
     abandon the remaining steps.
@@ -209,17 +240,12 @@ def provision_extras(client, config, hire, user_id, dry):
             act(msg)
             issues.append(msg)
 
-    prop = str(hire.get("property_number") or "")
-    if not prop:
-        act("groups skipped — no property_number in hire.yaml")
-        return issues
-    properties = {str(k): v for k, v in (config.get("properties") or {}).items()}
-    mapping = properties.get(prop)
-    if not isinstance(mapping, dict) or not mapping.get("groups"):
-        act(f"groups skipped — property {prop} has no groups in config.yaml")
+    group_ids = groups_for(hire, config)
+    if not group_ids:
+        act("groups skipped — nothing mapped for this property or title in config.yaml")
         return issues
 
-    for group_id in mapping["groups"]:
+    for group_id in group_ids:
         group = client.get_group(group_id)
         if group is None:
             msg = f"group {group_id} not found — check config.yaml"

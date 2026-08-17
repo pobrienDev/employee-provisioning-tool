@@ -17,7 +17,20 @@ corporate_property: "50"
 # Leave blank (or omit) to skip license assignment, e.g. in a dev tenant with no licenses.
 license_sku: ""
 
-# Property number -> groups the provisioned account joins
+# Groups every hire joins based on where and what they are, merged with the
+# property's own groups below (duplicates collapse):
+groups:
+  corporate:                                    # property_number == corporate_property
+    - "00000000-0000-0000-0000-000000000003"  # Corporate Staff
+  field:                                        # every other property
+    - "00000000-0000-0000-0000-000000000004"  # Field Staff
+  titles:                                       # case-insensitive exact title match
+    "Property Manager":
+      - "00000000-0000-0000-0000-000000000005"  # Property Managers
+    "Maintenance Technician":
+      - "00000000-0000-0000-0000-000000000006"  # Maintenance
+
+# Property number -> groups specific to that property
 properties:
   "101":
     name: Example Apartments
