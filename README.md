@@ -158,6 +158,8 @@ first_name: Taylor
 last_name: Example
 title: Property Manager
 property_number: 619
+# property_name is optional when config.yaml's property list has the number —
+# the tool fills it in from there (an explicit value here still wins)
 property_name: Example Apartments
 # reuse mode only — the role account being handed over:
 reuse_upn: manager619

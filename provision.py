@@ -124,6 +124,22 @@ def sanitize_local(text):
     return "".join(ch for ch in ascii_text if ch.isalnum()).lower()
 
 
+def enrich_property_name(hire, config):
+    """Fill in property_name from the config property list when absent.
+
+    hire.yaml only needs the property number once config.yaml knows the
+    property; an explicit property_name in hire.yaml still wins.
+    """
+    if hire.get("property_name") or not hire.get("property_number"):
+        return hire
+    properties = {str(k): v for k, v in (config.get("properties") or {}).items()}
+    entry = properties.get(str(hire["property_number"]))
+    if isinstance(entry, dict) and entry.get("name"):
+        hire = dict(hire)
+        hire["property_name"] = entry["name"]
+    return hire
+
+
 def display_name_for(hire, config):
     """Role-style display name at properties, personal name at corporate.
 
@@ -376,7 +392,7 @@ def cmd_skus(args):
 
 def cmd_new(args):
     config = load_config()
-    hire = load_hire()
+    hire = enrich_property_name(load_hire(), config)
     client = GraphClient.from_env()
     dry = args.dry_run
     if args.upn:
@@ -445,7 +461,7 @@ def cmd_new(args):
 
 def cmd_reuse(args):
     config = load_config()
-    hire = load_hire()
+    hire = enrich_property_name(load_hire(), config)
     client = GraphClient.from_env()
     dry = args.dry_run
 
