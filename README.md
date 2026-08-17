@@ -135,7 +135,7 @@ always addresses the person by name either way.
 The tool then assigns the configured license (skipped with a note when
 `license_sku` is blank) and joins the account to every group the hire
 qualifies for, merged from three sources in `config.yaml`: the property's
-own groups, a corporate-or-field set (chosen by comparing the property
+own groups, a corporate-or-site set (chosen by comparing the property
 number to `corporate_property`), and job-title groups (case-insensitive
 match under `groups.titles`). Each join is reported by group name, an
 already-present membership counts as fine, and duplicates across sources

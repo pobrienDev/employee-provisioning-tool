@@ -22,8 +22,8 @@ license_sku: ""
 groups:
   corporate:                                    # property_number == corporate_property
     - "00000000-0000-0000-0000-000000000003"  # Corporate Staff
-  field:                                        # every other property
-    - "00000000-0000-0000-0000-000000000004"  # Field Staff
+  site:                                         # every other property
+    - "00000000-0000-0000-0000-000000000004"  # Site Staff
   titles:                                       # case-insensitive exact title match
     "Property Manager":
       - "00000000-0000-0000-0000-000000000005"  # Property Managers

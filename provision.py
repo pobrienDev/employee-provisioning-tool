@@ -188,7 +188,7 @@ def groups_for(hire, config):
     """Every group the hire should join, from three sources:
 
     - the property's own groups (properties.<number>.groups)
-    - corporate or field membership (groups.corporate / groups.field,
+    - corporate or site membership (groups.corporate / groups.site,
       chosen by comparing property_number to corporate_property)
     - the job title (groups.titles, case-insensitive exact match)
 
@@ -204,7 +204,7 @@ def groups_for(hire, config):
         mapping = properties.get(prop)
         if isinstance(mapping, dict):
             selected += mapping.get("groups") or []
-        selected += group_cfg.get("corporate" if prop == corporate else "field") or []
+        selected += group_cfg.get("corporate" if prop == corporate else "site") or []
 
     title = (hire.get("title") or "").strip().lower()
     if title:
