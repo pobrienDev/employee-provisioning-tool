@@ -145,6 +145,13 @@ destructive path always requires the flag. Converting the mailbox to shared
 (if mail must be retained) is printed as a manual follow-up, since that is an
 Exchange operation outside the Graph v1.0 API.
 
+When the account's UPN is role-format (`{role}{property number}@`, e.g.
+`manager536@`), the tool also picks the first free personal address in the
+`{first initial}{last name}` convention and prints it as a manual
+add-an-alias step — the Graph API can't write Exchange aliases
+(`proxyAddresses` is read-only), so that last touch happens in the admin
+center.
+
 After provisioning, the tool prints the manual checklist of non-M365
 platforms marked on the form and a ready-to-paste login-info email (CC'ing
 the RPM when the form asks) — shown once, never saved to disk.

@@ -284,6 +284,28 @@ def reset_mfa(client, user_id, dry):
     return issues
 
 
+def role_alias_note(client, hire, config, upn):
+    """Suggest a personal email alias for role-format accounts.
+
+    A UPN like manager536@ still belongs to a person, so mail should also
+    reach them at {first initial}{last name}@. Graph can't write Exchange
+    aliases (proxyAddresses is read-only), so the tool picks the first free
+    personal address and prints it as a manual step.
+    """
+    local = upn.split("@", 1)[0]
+    roles = (config.get("naming") or {}).get("roles") or []
+    if not any(local.startswith(role) and local[len(role):].isdigit() for role in roles):
+        return
+    try:
+        alias = pick_upn(client, hire, config)
+    except ProvisionError:
+        return
+    act(
+        f"manual step — add {alias} as an email alias for {upn} "
+        "(admin center → user → Manage username and aliases; the Graph API can't set aliases)"
+    )
+
+
 def checklist(hire):
     """Reminder list of the non-M365 platforms marked yes on the form."""
     platforms = hire.get("platforms")
@@ -453,6 +475,7 @@ def cmd_new(args):
         user_id = created["id"]
 
     issues = provision_extras(client, config, hire, user_id, dry)
+    role_alias_note(client, hire, config, upn)
     checklist(hire)
     email_draft(hire, f"{hire['first_name']} {hire['last_name']}", upn, password)
     if issues:
@@ -530,6 +553,7 @@ def cmd_reuse(args):
 
     issues = reset_mfa(client, user["id"], dry)
     issues += provision_extras(client, config, hire, user["id"], dry)
+    role_alias_note(client, hire, config, upn)
     checklist(hire)
     email_draft(hire, f"{hire['first_name']} {hire['last_name']}", upn, password)
     if issues:
