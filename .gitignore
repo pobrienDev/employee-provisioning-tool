@@ -7,6 +7,9 @@ hire.yaml
 # Real config — property/group IDs, naming rules (config.example.yaml is the committed template)
 config.yaml
 
+# Company-specific email wording (email_template.example.txt is the committed template)
+email_template.txt
+
 # Audit logs
 logs/
 

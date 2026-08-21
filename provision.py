@@ -343,24 +343,46 @@ def checklist(hire):
 
 
 def email_draft(hire, display_name, upn, password):
-    """Print a ready-to-paste login-info email. Shown once, never saved."""
+    """Print a ready-to-paste login-info email. Shown once, never saved.
+
+    The wording lives in email_template.txt (git-ignored, so it can carry
+    company-specific text), falling back to the committed
+    email_template.example.txt. Placeholders: {name}, {first}, {last},
+    {username}, {password}.
+    """
     to = hire.get("login_info_email")
     if not to:
         return
     cc = hire.get("rpm_email") if hire.get("copy_rpm") else None
 
+    source = next(
+        (name for name in ("email_template.txt", "email_template.example.txt")
+         if (BASE_DIR / name).exists()),
+        None,
+    )
+    if source is None:
+        act("email draft skipped — no email_template.txt found")
+        return
+    template = (BASE_DIR / source).read_text(encoding="utf-8")
+    try:
+        rendered = template.format(
+            name=display_name,
+            first=hire["first_name"],
+            last=hire["last_name"],
+            username=upn,
+            password=password or "(generated at the real run)",
+        )
+    except (KeyError, IndexError, ValueError) as exc:
+        raise ProvisionError(
+            f"{source} has a placeholder problem ({exc}) — allowed: "
+            "{name}, {first}, {last}, {username}, {password}"
+        ) from exc
+
     print("\n--- login-info email draft (copy into your mail client; not sent, not saved) ---")
     print(f"To: {to}")
     if cc:
         print(f"Cc: {cc}")
-    print(f"Subject: Login details for {display_name}")
-    print()
-    print(f"{display_name}'s account is ready.")
-    print()
-    print(f"  Username:           {upn}")
-    print(f"  Temporary password: {password or '(generated at the real run)'}")
-    print()
-    print("They'll be prompted to choose a new password at first sign-in.")
+    print(rendered.rstrip())
     print("--- end draft ---")
     audit(f"login-info email drafted for {upn}" + (" (cc RPM)" if cc else ""))
 

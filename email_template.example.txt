@@ -1,0 +1,14 @@
+Subject: Login details for {name}
+
+Hello {name} and welcome to the team!
+
+Please see your email login information below. If you have any questions, please feel free to reply to this email.
+
+  Username:           {username}
+  Temporary password: {password}
+
+You will be prompted to choose a new password at first sign-in.
+
+Please use this link to log into your email: https://outlook.office.com
+
+Best,

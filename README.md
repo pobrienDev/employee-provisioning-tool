@@ -158,7 +158,11 @@ center.
 
 After provisioning, the tool prints the manual checklist of non-M365
 platforms marked on the form and a ready-to-paste login-info email (CC'ing
-the RPM when the form asks) — shown once, never saved to disk.
+the RPM when the form asks) — shown once, never saved to disk. The email
+wording is yours to edit: copy `email_template.example.txt` to
+`email_template.txt` (git-ignored, so it can carry company-specific text)
+and write what you like, using the placeholders `{name}`, `{first}`,
+`{last}`, `{username}`, and `{password}`. The first line is the subject.
 
 `hire.yaml` (git-ignored) carries the current hire's details, copied from
 the Formstack ticket's fields — about 30 seconds of copying that replaces
