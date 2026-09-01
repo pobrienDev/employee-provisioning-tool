@@ -292,11 +292,12 @@ def choose_license(client, config, hire):
     return None, None, notes, problem
 
 
-def provision_extras(client, config, hire, user_id, dry):
+def provision_extras(client, config, hire, user_id, dry, upn=None, join_dls=False):
     """License and group membership, shared by new and reuse.
 
-    Returns a list of issues rather than raising, so one failure doesn't
-    abandon the remaining steps.
+    Distribution lists print as manual steps unless join_dls asks for the
+    Exchange Online PowerShell path. Returns a list of issues rather than
+    raising, so one failure doesn't abandon the remaining steps.
     """
     issues = []
 
@@ -327,6 +328,7 @@ def provision_extras(client, config, hire, user_id, dry):
         act("groups skipped — nothing mapped for this property or title in config.yaml")
         return issues
 
+    pending_dls = []
     for group_id in group_ids:
         group = client.get_group(
             group_id, "displayName,groupTypes,mailEnabled,securityEnabled"
@@ -341,12 +343,16 @@ def provision_extras(client, config, hire, user_id, dry):
         if group.get("mailEnabled") and not unified:
             # Classic Exchange groups (distribution lists and mail-enabled
             # security groups) are read-only through the Graph API — their
-            # membership lives in Exchange. Same treatment as aliases and
-            # shared-mailbox conversion: a printed manual step.
-            act(
-                f"manual step — add to {label} in the Exchange admin center "
-                "(distribution list; the Graph API can't change its membership)"
-            )
+            # membership lives in Exchange. Joined via Exchange Online
+            # PowerShell behind --join-dls, otherwise a printed manual step.
+            if join_dls and upn:
+                pending_dls.append((group_id, label))
+            else:
+                act(
+                    f"manual step — add to {label} (distribution list; use the "
+                    "user's Assign memberships in the admin center — the Graph "
+                    "API can't change DL membership)"
+                )
             continue
         if dry:
             act(f"[dry-run] would add to group: {label}")
@@ -361,6 +367,20 @@ def provision_extras(client, config, hire, user_id, dry):
                 msg = f"could not add to {label}: {exc}"
                 act(msg)
                 issues.append(msg)
+
+    if pending_dls:
+        labels = ", ".join(label for _, label in pending_dls)
+        if dry:
+            act(
+                f"[dry-run] would join {len(pending_dls)} distribution "
+                f"list(s) via Exchange Online PowerShell, signed in as you: {labels}"
+            )
+        else:
+            try:
+                issues += join_distribution_lists(upn, pending_dls)
+            except ProvisionError as exc:
+                act(str(exc))
+                issues.append(str(exc))
     return issues
 
 
@@ -617,7 +637,9 @@ def cmd_new(args):
         print(f"  temp password: {password}  (must change at first sign-in)")
         user_id = created["id"]
 
-    issues = provision_extras(client, config, hire, user_id, dry)
+    issues = provision_extras(
+        client, config, hire, user_id, dry, upn=upn, join_dls=args.join_dls
+    )
     role_alias_note(client, hire, config, upn)
     checklist(hire)
     email_draft(hire, f"{hire['first_name']} {hire['last_name']}", upn, password)
@@ -695,7 +717,9 @@ def cmd_reuse(args):
         print("  mailbox history stays with the role account.")
 
     issues = reset_mfa(client, user["id"], dry)
-    issues += provision_extras(client, config, hire, user["id"], dry)
+    issues += provision_extras(
+        client, config, hire, user["id"], dry, upn=upn, join_dls=args.join_dls
+    )
     role_alias_note(client, hire, config, upn)
     checklist(hire)
     email_draft(hire, f"{hire['first_name']} {hire['last_name']}", upn, password)
@@ -703,35 +727,41 @@ def cmd_reuse(args):
         raise ProvisionError("completed with issues: " + "; ".join(issues))
 
 
-def convert_mailbox_shared(upn):
-    """Convert the account's mailbox to a shared mailbox.
+def exchange_shell(body):
+    """Run commands inside an Exchange Online PowerShell session.
 
-    Mailbox type is an Exchange setting the Graph API can't write, so this
-    shells out to Exchange Online PowerShell (Set-Mailbox -Type Shared) —
-    the one step that runs as the signed-in operator rather than the app
-    registration, and only behind terminate's opt-in --convert-shared.
-    Needs the ExchangeOnlineManagement module and an Exchange admin role;
-    Connect-ExchangeOnline opens a sign-in prompt.
+    Membership of classic distribution lists and mailbox type are Exchange
+    settings the Graph API can't write, so those steps shell out to the
+    ExchangeOnlineManagement module — the only place the tool acts as the
+    signed-in operator rather than the app registration, and always behind
+    an opt-in flag. Connect-ExchangeOnline opens a sign-in prompt; the
+    operator needs an Exchange admin (or recipient management) role.
     """
     shell = shutil.which("powershell") or shutil.which("pwsh")
     if shell is None:
-        raise ProvisionError("no PowerShell found — mailbox conversion needs it")
+        raise ProvisionError("no PowerShell found — Exchange steps need it")
     script = (
         "Import-Module ExchangeOnlineManagement -ErrorAction Stop; "
         "Connect-ExchangeOnline -ShowBanner:$false; "
-        f"Set-Mailbox -Identity '{upn}' -Type Shared -ErrorAction Stop; "
-        "Disconnect-ExchangeOnline -Confirm:$false"
+        + body +
+        "; Disconnect-ExchangeOnline -Confirm:$false"
     )
     try:
-        result = subprocess.run(
+        return subprocess.run(
             [shell, "-NoProfile", "-Command", script],
-            capture_output=True, text=True, timeout=300,
+            capture_output=True, text=True, timeout=600,
         )
     except subprocess.TimeoutExpired as exc:
         raise ProvisionError(
-            "mailbox conversion timed out — complete the sign-in prompt, or "
-            "convert manually in the Exchange admin center"
+            "Exchange Online PowerShell timed out — complete the sign-in "
+            "prompt, or do the step manually in the admin center"
         ) from exc
+
+
+def convert_mailbox_shared(upn):
+    """Convert the account's mailbox to a shared mailbox (terminate's
+    opt-in --convert-shared)."""
+    result = exchange_shell(f"Set-Mailbox -Identity '{upn}' -Type Shared -ErrorAction Stop")
     if result.returncode != 0:
         lines = (result.stderr or result.stdout or "").strip().splitlines()
         detail = lines[-1].strip() if lines else f"exit code {result.returncode}"
@@ -740,6 +770,52 @@ def convert_mailbox_shared(upn):
             "ExchangeOnlineManagement module installed, and do you hold an "
             "Exchange admin role?)"
         )
+
+
+def join_distribution_lists(upn, dls):
+    """Add the account to classic distribution lists (new/reuse's opt-in
+    --join-dls), all in one Exchange session.
+
+    dls is a list of (group_id, label) pairs; the Entra object ID works as
+    an Exchange identity. Already-a-member counts as joined. Returns a list
+    of issues; each outcome is reported through act().
+    """
+    quoted_upn = upn.replace("'", "''")
+    body = "; ".join(
+        f"try {{ Add-DistributionGroupMember -Identity '{gid}' "
+        f"-Member '{quoted_upn}' -ErrorAction Stop; Write-Output 'JOINED {gid}' }} "
+        f"catch {{ if (\"$_\" -match 'already a member') "
+        f"{{ Write-Output 'JOINED {gid}' }} else "
+        f"{{ Write-Output ('FAILED {gid} ' + $_) }} }}"
+        for gid, _ in dls
+    )
+    result = exchange_shell(body)
+    out = result.stdout or ""
+
+    if result.returncode != 0 and "JOINED" not in out and "FAILED" not in out:
+        lines = (result.stderr or out).strip().splitlines()
+        detail = lines[-1].strip() if lines else f"exit code {result.returncode}"
+        msg = (
+            f"distribution list joins failed — {detail} (is the "
+            "ExchangeOnlineManagement module installed, and do you hold an "
+            "Exchange admin or recipient management role?)"
+        )
+        act(msg)
+        return [msg]
+
+    issues = []
+    for gid, label in dls:
+        if f"JOINED {gid}" in out:
+            act(f"added to distribution list: {label}")
+            continue
+        line = next(
+            (ln for ln in out.splitlines() if ln.startswith(f"FAILED {gid}")), ""
+        )
+        detail = line.partition(f"FAILED {gid}")[2].strip() or "unknown error"
+        msg = f"could not add to {label}: {detail}"
+        act(msg)
+        issues.append(msg)
+    return issues
 
 
 def cmd_terminate(args):
@@ -862,6 +938,13 @@ def main(argv=None):
         "--dry-run", action="store_true",
         help="print what would happen without changing anything",
     )
+    new.add_argument(
+        "--join-dls", action="store_true",
+        help="also join Exchange distribution lists via Exchange Online "
+             "PowerShell (prompts for your own sign-in; needs an Exchange "
+             "admin or recipient management role) instead of printing them "
+             "as manual steps",
+    )
     new.set_defaults(func=cmd_new)
 
     reuse = subparsers.add_parser(
@@ -871,6 +954,13 @@ def main(argv=None):
     reuse.add_argument(
         "--dry-run", action="store_true",
         help="print what would happen without changing anything",
+    )
+    reuse.add_argument(
+        "--join-dls", action="store_true",
+        help="also join Exchange distribution lists via Exchange Online "
+             "PowerShell (prompts for your own sign-in; needs an Exchange "
+             "admin or recipient management role) instead of printing them "
+             "as manual steps",
     )
     reuse.set_defaults(func=cmd_reuse)
 
