@@ -8,6 +8,11 @@ tenant:
 naming:
   # Role-account prefixes that `discover <property number>` checks, e.g. manager619
   roles: [manager, assistant, leasing, maintenance]
+  # Optional: form wording -> how the title should read in the display name,
+  # for titles a form words awkwardly. The Job title attribute records the
+  # form's exact wording, and group and license rules match on it too.
+  # title_display:
+  #   "Concierge/Leasing": Leasing Concierge
 
 # Accounts at properties display as "{title} at {property name}"; accounts at
 # this property (the corporate office) keep a personal "First Last" name.

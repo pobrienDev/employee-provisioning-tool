@@ -147,6 +147,24 @@ def enrich_from_property(hire, config):
     return hire
 
 
+def display_title(hire, config):
+    """The hire's title as it should read on the account.
+
+    Forms don't always word a title the way it should read in a display
+    name, so naming.title_display maps the form's wording to the display
+    one (e.g. "Concierge/Leasing" -> "Leasing Concierge"). It affects the
+    display name alone: the Job title attribute records the form's exact
+    wording, as do group and licensing matching. Unmapped titles pass
+    through.
+    """
+    title = (hire.get("title") or "").strip()
+    mapping = (config.get("naming") or {}).get("title_display") or {}
+    for form_wording, shown in mapping.items():
+        if str(form_wording).strip().lower() == title.lower():
+            return str(shown)
+    return title
+
+
 def display_name_for(hire, config):
     """Role-style display name at properties, personal name at corporate.
 
@@ -158,7 +176,7 @@ def display_name_for(hire, config):
     prop = str(hire.get("property_number") or "")
     corporate = str(config.get("corporate_property") or "50")
     if prop and prop != corporate and hire.get("title") and hire.get("property_name"):
-        return f"{hire['title']} at {hire['property_name']}"
+        return f"{display_title(hire, config)} at {hire['property_name']}"
     return f"{hire['first_name']} {hire['last_name']}"
 
 
