@@ -215,6 +215,76 @@ def groups_for(hire, config):
     return list(dict.fromkeys(selected))
 
 
+def choose_license(client, config, hire):
+    """Pick the license SKU for this hire from config.yaml's licensing rules.
+
+    The `licensing` section holds ordered fallback chains — corporate
+    (property_number == corporate_property), maintenance (title contains a
+    maintenance keyword), and default — whose entries are skuPartNumber
+    values or skuId GUIDs. The first SKU in the hire's chain with free seats
+    wins; a chain with one entry means "this SKU or nothing". Without a
+    `licensing` section, the flat `license_sku` keeps its old behavior.
+
+    Returns (sku_id, label, notes, problem): sku_id is None when nothing
+    should be assigned, notes are act()-ready lines explaining the choice,
+    and problem is set when the outcome should count as an issue.
+    """
+    licensing = config.get("licensing")
+    if not isinstance(licensing, dict):
+        sku = config.get("license_sku")
+        if not sku:
+            return None, None, ["license skipped — no licensing rules in config.yaml"], None
+        return sku, str(sku), [], None
+
+    prop = str(hire.get("property_number") or "")
+    corporate = str(config.get("corporate_property") or "50")
+    title = (hire.get("title") or "").lower()
+    keywords = [str(k).lower() for k in licensing.get("maintenance_keywords") or ["maintenance"]]
+
+    if prop and prop == corporate:
+        chain, which = licensing.get("corporate"), "corporate"
+    elif any(keyword in title for keyword in keywords):
+        chain, which = licensing.get("maintenance"), "maintenance"
+    else:
+        chain, which = licensing.get("default"), "default"
+    if not chain:
+        return None, None, [f"license skipped — no licensing.{which} chain in config.yaml"], None
+
+    try:
+        skus = client.list_skus()
+    except GraphError as exc:
+        if exc.status == 403:
+            problem = (
+                "license not assigned — checking seat availability needs the "
+                "Organization.Read.All application permission (admin-consented)"
+            )
+            return None, None, [], problem
+        raise
+    by_key = {}
+    for sku in skus:
+        by_key[str(sku.get("skuId", "")).lower()] = sku
+        by_key[str(sku.get("skuPartNumber", "")).lower()] = sku
+
+    notes = []
+    for entry in chain:
+        sku = by_key.get(str(entry).lower())
+        if sku is None:
+            notes.append(f"license option {entry} not in this tenant — skipping it")
+            continue
+        part = sku.get("skuPartNumber") or sku.get("skuId")
+        free = (sku.get("prepaidUnits") or {}).get("enabled", 0) - sku.get("consumedUnits", 0)
+        if free <= 0:
+            notes.append(f"no {part} seats free — trying next option")
+            continue
+        return sku["skuId"], f"{part} ({which} rule, {free} seat(s) free)", notes, None
+
+    problem = (
+        f"license not assigned — no seats free on any licensing.{which} option "
+        f"({', '.join(str(entry) for entry in chain)})"
+    )
+    return None, None, notes, problem
+
+
 def provision_extras(client, config, hire, user_id, dry):
     """License and group membership, shared by new and reuse.
 
@@ -223,18 +293,23 @@ def provision_extras(client, config, hire, user_id, dry):
     """
     issues = []
 
-    sku = config.get("license_sku")
-    if not sku:
-        act("license skipped — no license_sku in config.yaml")
+    sku_id, label, notes, problem = choose_license(client, config, hire)
+    for note in notes:
+        act(note)
+    if problem:
+        act(problem)
+        issues.append(problem)
+    elif sku_id is None:
+        pass  # the notes already said why nothing gets assigned
     elif dry:
-        act(f"[dry-run] would assign license {sku}")
+        act(f"[dry-run] would assign license {label}")
     else:
         try:
-            client.assign_license(user_id, sku)
-            act("license assigned")
+            client.assign_license(user_id, sku_id)
+            act(f"license assigned: {label}")
         except GraphError as exc:
             if "available licenses" in str(exc):
-                msg = "license not assigned — no seats left on the configured SKU"
+                msg = "license not assigned — the last free seat was taken mid-run"
             else:
                 msg = f"license not assigned — {exc}"
             act(msg)

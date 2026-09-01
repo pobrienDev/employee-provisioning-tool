@@ -132,8 +132,11 @@ display as "{title} at {property name}" (e.g. "Property Manager at Example
 Apartments"), while accounts at the corporate office (`corporate_property`
 in `config.yaml`) keep a personal "First Last" name. The login-info email
 always addresses the person by name either way.
-The tool then assigns the configured license (skipped with a note when
-`license_sku` is blank) and joins the account to every group the hire
+The tool then assigns the configured license — either the flat `license_sku`,
+or rule-based `licensing` chains keyed by who the hire is (corporate property,
+maintenance title, or everyone else), where the first SKU with free seats
+wins, seat counts checked live via `Organization.Read.All`. With neither
+configured the step is skipped with a note. It then joins the account to every group the hire
 qualifies for, merged from three sources in `config.yaml`: the property's
 own groups, a corporate-or-site set (chosen by comparing the property
 number to `corporate_property`), and job-title groups (case-insensitive

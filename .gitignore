@@ -1,11 +1,15 @@
-# Secrets — tenant ID, client ID, client secret
+# Secrets — tenant ID, client ID, client secret (plus per-tenant variants)
 .env
+.env.*
+!.env.example
 
 # Per-hire input file (contains personal data from the form)
 hire.yaml
 
 # Real config — property/group IDs, naming rules (config.example.yaml is the committed template)
 config.yaml
+config.test.yaml
+config.prod.yaml
 
 # Company-specific email wording (email_template.example.txt is the committed template)
 email_template.txt

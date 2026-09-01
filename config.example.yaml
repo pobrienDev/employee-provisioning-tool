@@ -17,6 +17,18 @@ corporate_property: "50"
 # Leave blank (or omit) to skip license assignment, e.g. in a dev tenant with no licenses.
 license_sku: ""
 
+# Or replace license_sku with rule-based chains: the hire's chain is picked by
+# who they are (corporate property / maintenance title / everyone else), and
+# the first SKU in it with free seats is assigned — checked live, which needs
+# the Organization.Read.All permission. Entries are skuPartNumber values or
+# skuId GUIDs from `python provision.py skus`; a one-entry chain means "this
+# SKU or nothing".
+# licensing:
+#   corporate: [SPB]
+#   maintenance: [STANDARDPACK, EXCHANGESTANDARD]
+#   default: [SPB, STANDARDPACK, EXCHANGESTANDARD]
+#   maintenance_keywords: [maintenance]
+
 # Groups every hire joins based on where and what they are, merged with the
 # property's own groups below (duplicates collapse):
 groups:
