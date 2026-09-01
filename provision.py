@@ -321,13 +321,26 @@ def provision_extras(client, config, hire, user_id, dry):
         return issues
 
     for group_id in group_ids:
-        group = client.get_group(group_id)
+        group = client.get_group(
+            group_id, "displayName,groupTypes,mailEnabled,securityEnabled"
+        )
         if group is None:
             msg = f"group {group_id} not found — check config.yaml"
             act(msg)
             issues.append(msg)
             continue
         label = group.get("displayName") or group_id
+        unified = "Unified" in (group.get("groupTypes") or [])
+        if group.get("mailEnabled") and not unified:
+            # Classic Exchange groups (distribution lists and mail-enabled
+            # security groups) are read-only through the Graph API — their
+            # membership lives in Exchange. Same treatment as aliases and
+            # shared-mailbox conversion: a printed manual step.
+            act(
+                f"manual step — add to {label} in the Exchange admin center "
+                "(distribution list; the Graph API can't change its membership)"
+            )
+            continue
         if dry:
             act(f"[dry-run] would add to group: {label}")
             continue
