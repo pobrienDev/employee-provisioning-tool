@@ -124,19 +124,24 @@ def sanitize_local(text):
     return "".join(ch for ch in ascii_text if ch.isalnum()).lower()
 
 
-def enrich_property_name(hire, config):
-    """Fill in property_name from the config property list when absent.
+def enrich_from_property(hire, config):
+    """Fill in hire fields the config property list can supply when absent.
 
-    hire.yaml only needs the property number once config.yaml knows the
-    property; an explicit property_name in hire.yaml still wins.
+    property_name comes from the property entry's name and rpm_email from
+    its rpm, so hire.yaml only needs the property number once config.yaml
+    knows the property. Explicit values in hire.yaml still win.
     """
-    if hire.get("property_name") or not hire.get("property_number"):
+    if not hire.get("property_number"):
         return hire
     properties = {str(k): v for k, v in (config.get("properties") or {}).items()}
     entry = properties.get(str(hire["property_number"]))
-    if isinstance(entry, dict) and entry.get("name"):
-        hire = dict(hire)
+    if not isinstance(entry, dict):
+        return hire
+    hire = dict(hire)
+    if not hire.get("property_name") and entry.get("name"):
         hire["property_name"] = entry["name"]
+    if not hire.get("rpm_email") and entry.get("rpm"):
+        hire["rpm_email"] = entry["rpm"]
     return hire
 
 
@@ -550,7 +555,7 @@ def cmd_skus(args):
 
 def cmd_new(args):
     config = load_config()
-    hire = enrich_property_name(load_hire(), config)
+    hire = enrich_from_property(load_hire(), config)
     client = GraphClient.from_env()
     dry = args.dry_run
     if args.upn:
@@ -620,7 +625,7 @@ def cmd_new(args):
 
 def cmd_reuse(args):
     config = load_config()
-    hire = enrich_property_name(load_hire(), config)
+    hire = enrich_from_property(load_hire(), config)
     client = GraphClient.from_env()
     dry = args.dry_run
 

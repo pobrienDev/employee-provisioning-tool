@@ -42,10 +42,13 @@ groups:
     "Maintenance Technician":
       - "00000000-0000-0000-0000-000000000006"  # Maintenance
 
-# Property number -> groups specific to that property
+# Property number -> groups specific to that property. An optional rpm: is
+# the property's Regional Property Manager, CC'd on login-info emails when
+# hire.yaml asks (copy_rpm) and gives no rpm_email of its own.
 properties:
   "101":
     name: Example Apartments
+    rpm: rpm@example.com
     groups:
       - "00000000-0000-0000-0000-000000000001"  # All Staff
       - "00000000-0000-0000-0000-000000000002"  # Property 101 distribution list
