@@ -18,7 +18,9 @@ never passwords or personal contact details.
 
 import argparse
 import secrets
+import shutil
 import string
+import subprocess
 import sys
 import unicodedata
 from datetime import datetime
@@ -701,6 +703,45 @@ def cmd_reuse(args):
         raise ProvisionError("completed with issues: " + "; ".join(issues))
 
 
+def convert_mailbox_shared(upn):
+    """Convert the account's mailbox to a shared mailbox.
+
+    Mailbox type is an Exchange setting the Graph API can't write, so this
+    shells out to Exchange Online PowerShell (Set-Mailbox -Type Shared) —
+    the one step that runs as the signed-in operator rather than the app
+    registration, and only behind terminate's opt-in --convert-shared.
+    Needs the ExchangeOnlineManagement module and an Exchange admin role;
+    Connect-ExchangeOnline opens a sign-in prompt.
+    """
+    shell = shutil.which("powershell") or shutil.which("pwsh")
+    if shell is None:
+        raise ProvisionError("no PowerShell found — mailbox conversion needs it")
+    script = (
+        "Import-Module ExchangeOnlineManagement -ErrorAction Stop; "
+        "Connect-ExchangeOnline -ShowBanner:$false; "
+        f"Set-Mailbox -Identity '{upn}' -Type Shared -ErrorAction Stop; "
+        "Disconnect-ExchangeOnline -Confirm:$false"
+    )
+    try:
+        result = subprocess.run(
+            [shell, "-NoProfile", "-Command", script],
+            capture_output=True, text=True, timeout=300,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ProvisionError(
+            "mailbox conversion timed out — complete the sign-in prompt, or "
+            "convert manually in the Exchange admin center"
+        ) from exc
+    if result.returncode != 0:
+        lines = (result.stderr or result.stdout or "").strip().splitlines()
+        detail = lines[-1].strip() if lines else f"exit code {result.returncode}"
+        raise ProvisionError(
+            f"mailbox conversion failed — {detail} (is the "
+            "ExchangeOnlineManagement module installed, and do you hold an "
+            "Exchange admin role?)"
+        )
+
+
 def cmd_terminate(args):
     config = load_config()
     client = GraphClient.from_env()
@@ -724,17 +765,24 @@ def cmd_terminate(args):
 
     if dry:
         act("[dry-run] would disable the account and revoke every session")
+        if args.convert_shared:
+            act(
+                "[dry-run] would convert the mailbox to shared "
+                "(Exchange Online PowerShell, signed in as you)"
+            )
         for group in groups:
             act(f"[dry-run] would remove from group: {group.get('displayName') or group['id']}")
         if licenses:
             act(f"[dry-run] would remove {len(licenses)} license(s)")
         else:
             act("no licenses to remove")
-        print("  manual step if mail must be retained: convert the mailbox to shared (Exchange admin center)")
+        if not args.convert_shared:
+            print("  manual step if mail must be retained: convert the mailbox to shared (Exchange admin center)")
         return
 
     print(
-        f"  plan: disable account, revoke sessions, remove "
+        f"  plan: disable account, revoke sessions,"
+        f"{' convert the mailbox to shared,' if args.convert_shared else ''} remove "
         f"{len(groups)} group membership(s), remove {len(licenses)} license(s)"
     )
     if not args.yes:
@@ -746,6 +794,18 @@ def cmd_terminate(args):
     act("account disabled, sessions revoked")
 
     issues = []
+    converted = not args.convert_shared  # nothing to wait on when not asked for
+    if args.convert_shared:
+        # Convert while the mailbox is still licensed; a shared mailbox under
+        # 50GB then needs no license of its own.
+        try:
+            convert_mailbox_shared(upn)
+            act("mailbox converted to shared")
+            converted = True
+        except ProvisionError as exc:
+            act(str(exc))
+            issues.append(str(exc))
+
     for group in groups:
         label = group.get("displayName") or group["id"]
         try:
@@ -756,13 +816,20 @@ def cmd_terminate(args):
             act(msg)
             issues.append(msg)
 
-    if licenses:
+    if not licenses:
+        act("no licenses to remove")
+    elif converted:
         client.remove_licenses(user["id"], licenses)
         act(f"removed {len(licenses)} license(s)")
     else:
-        act("no licenses to remove")
+        # Pulling the license off an unconverted mailbox starts its deletion
+        # clock — keep it until the conversion has actually happened.
+        msg = "licenses kept — convert the mailbox first, then remove them"
+        act(msg)
+        issues.append(msg)
 
-    print("  manual step if mail must be retained: convert the mailbox to shared (Exchange admin center)")
+    if not args.convert_shared:
+        print("  manual step if mail must be retained: convert the mailbox to shared (Exchange admin center)")
     if issues:
         raise ProvisionError("offboarding finished with issues — " + "; ".join(issues))
 
@@ -819,6 +886,12 @@ def main(argv=None):
     terminate.add_argument(
         "--yes", action="store_true",
         help="actually offboard; without it the command only previews the plan",
+    )
+    terminate.add_argument(
+        "--convert-shared", action="store_true",
+        help="also convert the mailbox to a shared mailbox before removing "
+             "licenses (Exchange Online PowerShell — prompts for your own "
+             "sign-in and needs an Exchange admin role)",
     )
     terminate.add_argument(
         "--dry-run", action="store_true",

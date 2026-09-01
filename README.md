@@ -106,6 +106,7 @@ python provision.py reuse --upn manager619
 python provision.py skus                  # license SKU IDs for config.yaml
 python provision.py terminate manager619        # preview the offboarding plan
 python provision.py terminate manager619 --yes  # actually offboard
+python provision.py terminate manager619 --yes --convert-shared  # ...keeping mail in a shared mailbox
 python provision.py new --dry-run               # rehearse any write command
 ```
 
@@ -149,8 +150,16 @@ concurrency errors are retried automatically.
 every session, then remove all group memberships and licenses. Without
 `--yes` it only prints who would be offboarded and what would happen — the
 destructive path always requires the flag. Converting the mailbox to shared
-(if mail must be retained) is printed as a manual follow-up, since that is an
-Exchange operation outside the Graph v1.0 API.
+(if mail must be retained) is printed as a manual follow-up by default, since
+mailbox type is an Exchange setting outside the Graph v1.0 API. Opt in with
+`--convert-shared` and the tool does it for you between lockout and license
+removal — by shelling out to Exchange Online PowerShell (`Set-Mailbox -Type
+Shared`), the one step that runs as *your* signed-in account rather than the
+app registration. It needs the `ExchangeOnlineManagement` module
+(`Install-Module ExchangeOnlineManagement`) and an Exchange admin role, and
+`Connect-ExchangeOnline` opens a sign-in prompt mid-run. If the conversion
+fails, the licenses are deliberately left in place — removing a license from
+an unconverted mailbox starts its deletion clock.
 
 When the account's UPN is role-format (`{role}{property number}@`, e.g.
 `manager536@`), the tool also picks the first free personal address in the
