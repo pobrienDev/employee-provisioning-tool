@@ -17,6 +17,8 @@ never passwords or personal contact details.
 """
 
 import argparse
+import html
+import re
 import secrets
 import shutil
 import string
@@ -487,6 +489,42 @@ def checklist(hire):
         act("manual checklist — accounts still to create: " + ", ".join(needed))
 
 
+def copy_draft_to_clipboard(body):
+    """Put the draft body on the clipboard as rich text (best-effort).
+
+    A URL pasted into Outlook as plain text stays plain — Outlook only
+    links URLs as they are typed. Copying the body as HTML keeps the link
+    clickable and the line breaks intact. On failure the printed draft is
+    still there to copy by hand, so this never raises.
+    """
+    shell = shutil.which("powershell") or shutil.which("pwsh")
+    if shell is None:
+        return False
+    linked = re.sub(
+        r"(https?://[^\s<]+)", r'<a href="\1">\1</a>', html.escape(body)
+    )
+    body_html = (
+        '<div style="font-family:Calibri, Arial, sans-serif; font-size:11pt">'
+        + linked.replace("\n", "<br>\n")
+        + "</div>"
+    )
+    # The body travels over stdin as UTF-8 bytes: nothing sensitive lands
+    # on the command line, and no console codepage can garble it.
+    script = (
+        "$in=[Console]::OpenStandardInput(); "
+        "$ms=New-Object IO.MemoryStream; $in.CopyTo($ms); "
+        "Set-Clipboard -AsHtml -Value ([Text.Encoding]::UTF8.GetString($ms.ToArray()))"
+    )
+    try:
+        result = subprocess.run(
+            [shell, "-NoProfile", "-Command", script],
+            input=body_html.encode("utf-8"), capture_output=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
 def email_draft(hire, display_name, upn, password):
     """Print a ready-to-paste login-info email. Shown once, never saved.
 
@@ -529,6 +567,14 @@ def email_draft(hire, display_name, upn, password):
         print(f"Cc: {cc}")
     print(rendered.rstrip())
     print("--- end draft ---")
+
+    # First template line is the subject; the clipboard gets just the body.
+    parts = rendered.rstrip().split("\n", 1)
+    body = parts[1].lstrip("\n") if len(parts) > 1 else parts[0]
+    if copy_draft_to_clipboard(body):
+        print("  (body copied to the clipboard as rich text — paste into Outlook and the link stays clickable)")
+    else:
+        print("  (clipboard copy unavailable — after pasting in Outlook, click at the end of the link and press Enter to make it clickable)")
     audit(f"login-info email drafted for {upn}" + (" (cc RPM)" if cc else ""))
 
 
