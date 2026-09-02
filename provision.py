@@ -349,7 +349,7 @@ def provision_extras(client, config, hire, user_id, dry, upn=None, join_dls=Fals
     pending_dls = []
     for group_id in group_ids:
         group = client.get_group(
-            group_id, "displayName,groupTypes,mailEnabled,securityEnabled"
+            group_id, "displayName,groupTypes,mailEnabled,securityEnabled,mail"
         )
         if group is None:
             msg = f"group {group_id} not found — check config.yaml"
@@ -362,15 +362,10 @@ def provision_extras(client, config, hire, user_id, dry, upn=None, join_dls=Fals
             # Classic Exchange groups (distribution lists and mail-enabled
             # security groups) are read-only through the Graph API — their
             # membership lives in Exchange. Joined via Exchange Online
-            # PowerShell behind --join-dls, otherwise a printed manual step.
-            if join_dls and upn:
-                pending_dls.append((group_id, label))
-            else:
-                act(
-                    f"manual step — add to {label} (distribution list; use the "
-                    "user's Assign memberships in the admin center — the Graph "
-                    "API can't change DL membership)"
-                )
+            # PowerShell behind --join-dls, otherwise printed as paste-ready
+            # commands. The SMTP address is the identity Exchange resolves
+            # unambiguously; the object ID is only a fallback.
+            pending_dls.append((group.get("mail") or group_id, label))
             continue
         if dry:
             act(f"[dry-run] would add to group: {label}")
@@ -388,17 +383,34 @@ def provision_extras(client, config, hire, user_id, dry, upn=None, join_dls=Fals
 
     if pending_dls:
         labels = ", ".join(label for _, label in pending_dls)
-        if dry:
-            act(
-                f"[dry-run] would join {len(pending_dls)} distribution "
-                f"list(s) via Exchange Online PowerShell, signed in as you: {labels}"
-            )
+        if join_dls and upn:
+            if dry:
+                act(
+                    f"[dry-run] would join {len(pending_dls)} distribution "
+                    f"list(s) via Exchange Online PowerShell, signed in as you: {labels}"
+                )
+            else:
+                try:
+                    issues += join_distribution_lists(upn, pending_dls)
+                except ProvisionError as exc:
+                    act(str(exc))
+                    issues.append(str(exc))
         else:
-            try:
-                issues += join_distribution_lists(upn, pending_dls)
-            except ProvisionError as exc:
-                act(str(exc))
-                issues.append(str(exc))
+            # Paste-ready commands beat a per-run sign-in: connect once per
+            # day, then each hire's joins are a two-second paste. (The
+            # admin center's Assign memberships panel works too.)
+            act(
+                f"{len(pending_dls)} distribution list join(s) printed below — "
+                "paste into an Exchange Online PowerShell window "
+                "(Connect-ExchangeOnline once, then reuse the session)"
+            )
+            member = (upn or "<upn>").replace("'", "''")
+            for identity, label in pending_dls:
+                quoted = str(identity).replace("'", "''")
+                print(
+                    f"    Add-DistributionGroupMember -Identity '{quoted}' "
+                    f"-Member '{member}'  # {label}"
+                )
     return issues
 
 
@@ -794,9 +806,10 @@ def join_distribution_lists(upn, dls):
     """Add the account to classic distribution lists (new/reuse's opt-in
     --join-dls), all in one Exchange session.
 
-    dls is a list of (group_id, label) pairs; the Entra object ID works as
-    an Exchange identity. Already-a-member counts as joined. Returns a list
-    of issues; each outcome is reported through act().
+    dls is a list of (identity, label) pairs where identity is the group's
+    SMTP address — the identity Exchange resolves unambiguously — with the
+    object ID as a fallback. Already-a-member counts as joined. Returns a
+    list of issues; each outcome is reported through act().
     """
     quoted_upn = upn.replace("'", "''")
     body = "; ".join(

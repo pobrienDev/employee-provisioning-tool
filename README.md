@@ -147,15 +147,17 @@ collapse. Transient Graph throttling and
 concurrency errors are retried automatically.
 
 Classic Exchange distribution lists are the exception: their membership is
-read-only through the Graph API, so they print as manual admin center steps
-by default. Opt in with `--join-dls` (on `new` or `reuse`) and the tool joins
-them all in one Exchange Online PowerShell session instead — like
-`--convert-shared`, this one step runs as *your* signed-in account, needs the
-`ExchangeOnlineManagement` module plus an Exchange admin or recipient
-management role, and treats already-a-member as success. A just-created
-account can take a minute to become visible to Exchange; if a join fails on
-that, re-running with `--join-dls` retries cleanly since Graph-side joins
-already made count as fine.
+read-only through the Graph API. By default the run prints their joins as
+paste-ready `Add-DistributionGroupMember` commands, addressed by each list's
+SMTP address — run `Connect-ExchangeOnline` once and keep the window open,
+and each hire's joins become a two-second paste (the admin center's Assign
+memberships panel works too). Or opt in with `--join-dls` (on `new` or
+`reuse`) and the tool opens the Exchange Online PowerShell session itself —
+like `--convert-shared`, that one step runs as *your* signed-in account,
+needs the `ExchangeOnlineManagement` module plus an Exchange admin or
+recipient management role, and treats already-a-member as success. Either
+way, a just-created account can take a minute to become visible to Exchange —
+if a join fails on that, retry it a minute later.
 
 `terminate` offboards in lockout-first order: disable the account and revoke
 every session, then remove all group memberships and licenses. Without
