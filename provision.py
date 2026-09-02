@@ -17,7 +17,9 @@ never passwords or personal contact details.
 """
 
 import argparse
+import base64
 import html
+import json
 import re
 import secrets
 import shutil
@@ -489,13 +491,37 @@ def checklist(hire):
         act("manual checklist — accounts still to create: " + ", ".join(needed))
 
 
+def cf_html(fragment):
+    """Wrap an HTML fragment in the clipboard's CF_HTML format.
+
+    CF_HTML is the fragment plus a fixed header of 10-digit BYTE offsets
+    into the UTF-8 payload, so the offsets are computed on encoded lengths.
+    """
+    header = (
+        "Version:0.9\r\nStartHTML:{:010d}\r\nEndHTML:{:010d}\r\n"
+        "StartFragment:{:010d}\r\nEndFragment:{:010d}\r\n"
+    )
+    prefix = "<html><body><!--StartFragment-->"
+    suffix = "<!--EndFragment--></body></html>"
+    header_len = len(header.format(0, 0, 0, 0))
+    start_frag = header_len + len(prefix.encode("utf-8"))
+    end_frag = start_frag + len(fragment.encode("utf-8"))
+    end_html = end_frag + len(suffix.encode("utf-8"))
+    return (
+        header.format(header_len, end_html, start_frag, end_frag)
+        + prefix + fragment + suffix
+    ).encode("utf-8")
+
+
 def copy_draft_to_clipboard(body):
-    """Put the draft body on the clipboard as rich text (best-effort).
+    """Put the draft body on the clipboard as rich text AND plain text.
 
     A URL pasted into Outlook as plain text stays plain — Outlook only
-    links URLs as they are typed. Copying the body as HTML keeps the link
-    clickable and the line breaks intact. On failure the printed draft is
-    still there to copy by hand, so this never raises.
+    links URLs as they are typed — so the clipboard gets an HTML version
+    with a real hyperlink. The plain-text format goes on alongside it:
+    a clipboard holding only HTML reads as empty to plain-text targets
+    (and to clipboard history). On failure the printed draft is still
+    there to copy by hand, so this never raises.
     """
     shell = shutil.which("powershell") or shutil.which("pwsh")
     if shell is None:
@@ -503,22 +529,32 @@ def copy_draft_to_clipboard(body):
     linked = re.sub(
         r"(https?://[^\s<]+)", r'<a href="\1">\1</a>', html.escape(body)
     )
-    body_html = (
+    fragment = (
         '<div style="font-family:Calibri, Arial, sans-serif; font-size:11pt">'
         + linked.replace("\n", "<br>\n")
         + "</div>"
     )
-    # The body travels over stdin as UTF-8 bytes: nothing sensitive lands
-    # on the command line, and no console codepage can garble it.
+    # Both formats travel over stdin as ASCII-safe JSON: nothing sensitive
+    # lands on a command line or disk, and no console codepage can garble
+    # it. The HTML goes as base64 of the exact UTF-8 bytes the CF_HTML
+    # offsets were computed against.
+    payload = json.dumps({
+        "html64": base64.b64encode(cf_html(fragment)).decode("ascii"),
+        "text": body.replace("\n", "\r\n"),
+    })
     script = (
-        "$in=[Console]::OpenStandardInput(); "
-        "$ms=New-Object IO.MemoryStream; $in.CopyTo($ms); "
-        "Set-Clipboard -AsHtml -Value ([Text.Encoding]::UTF8.GetString($ms.ToArray()))"
+        "Add-Type -AssemblyName System.Windows.Forms; "
+        "$j = [Console]::In.ReadToEnd() | ConvertFrom-Json; "
+        "$ms = New-Object IO.MemoryStream(,[Convert]::FromBase64String($j.html64)); "
+        "$do = New-Object Windows.Forms.DataObject; "
+        "$do.SetData([Windows.Forms.DataFormats]::Html, $ms); "
+        "$do.SetText($j.text); "
+        "[Windows.Forms.Clipboard]::SetDataObject($do, $true)"
     )
     try:
         result = subprocess.run(
             [shell, "-NoProfile", "-Command", script],
-            input=body_html.encode("utf-8"), capture_output=True, timeout=30,
+            input=payload.encode("ascii"), capture_output=True, timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
