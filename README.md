@@ -19,15 +19,21 @@ one reviewed command.
 
 ## Design
 
-- **App-only auth (client credentials):** the tool authenticates as an Entra
-  ID app registration — never as a signed-in user — so it can only ever touch
-  the tenant configured in `.env`. Plain `requests` against the REST API; no
-  SDK.
+- **App-only auth (client credentials) at the core:** the tool authenticates
+  as an Entra ID app registration, so it can only ever touch the tenant
+  configured in `.env`. Plain `requests` against the REST API; no SDK.
+  The exceptions are deliberate and opt-in: steps the Graph application
+  model can't or shouldn't do (Exchange distribution lists, mailbox
+  conversion, drafts in the operator's own mailbox) run as the *signed-in
+  operator* behind explicit flags, borrowing the operator's rights for that
+  moment instead of enlarging the app's.
 - **Scoped permissions:** the app registration carries only the two
   application permissions the tool's core job needs — `User.ReadWrite.All`
   and `Group.ReadWrite.All` — granted once up front so each phase doesn't
   require a new admin-consent round. Anything beyond them (password-profile
-  writes, sign-in activity reads) is added only if a phase actually needs it.
+  writes, sign-in activity reads, the delegated mailbox scope) is added only
+  if a feature actually needs it, and the tenant-wide application version of
+  a permission is never taken where a delegated one does the job.
 - **Secrets stay out of the repo:** credentials live in a git-ignored `.env`,
   tenant-specific IDs in a git-ignored `config.yaml` (the committed
   `config.example.yaml` documents the shape). The `.gitignore` was the
@@ -50,6 +56,7 @@ one reviewed command.
 | 3 | License assignment + property group membership (`skus` helper) | **done** |
 | 4 | Offboarding: `terminate` — disable, revoke sessions, strip groups and licenses | **done** |
 | 5 | `--dry-run`, audit logging, per-hire checklist, login-info email draft | **done** |
+| 5+ | Extras: rule-based licensing, DL joins (`--join-dls`), shared-mailbox conversion (`--convert-shared`), clipboard-ready email, Outlook draft with captured signature (`--open-draft`) | **done** |
 | 6 | Zendesk integration (pull the Formstack fields from the ticket automatically) | stretch |
 
 ## Setup
@@ -73,9 +80,10 @@ one reviewed command.
 
 4. **Config:** copy `config.example.yaml` to `config.yaml` and fill in the
    tenant domain, the role-account prefixes used at your properties, the
-   license SKU to assign (`python provision.py skus` lists the IDs; leave
-   blank in a tenant with no licenses and the step is skipped), and the
-   property number → group ID mappings.
+   license to assign — a flat `license_sku`, or rule-based `licensing`
+   chains (`python provision.py skus` lists the IDs; leave both out in a
+   tenant with no licenses and the step is skipped) — and the property
+   number → group ID mappings.
 
 Optional permissions unlock extras:
 
@@ -90,6 +98,14 @@ Optional permissions unlock extras:
   previous holder's registered MFA methods (phone, Authenticator, security
   keys) so the new hire enrolls fresh; without it the step is skipped with a
   note.
+- **Delegated** `Mail.ReadWrite` plus "Allow public client flows" (on the
+  app registration's Authentication page) — unlocks `--open-draft` and
+  `capture-signature`, which sign in as the operator (device-code prompt)
+  and touch only that one mailbox.
+- Not a permission, but a prerequisite: `--join-dls` and `--convert-shared`
+  shell out to Exchange Online PowerShell, so they need
+  `Install-Module ExchangeOnlineManagement` and an Exchange admin or
+  recipient management role on the operator's own account.
 
 ## Usage
 
@@ -101,9 +117,12 @@ python provision.py discover 619          # role accounts for property 619
 python provision.py discover manager619   # accounts matching a UPN prefix
 python provision.py new                   # fresh account for the hire in hire.yaml
 python provision.py new --upn tsmith2     # ...with an explicit UPN
+python provision.py new --join-dls        # ...also joining distribution lists (signs in as you)
+python provision.py new --open-draft      # ...also drafting the email in your Outlook Drafts
 python provision.py reuse                 # hand reuse_upn's account to the hire
 python provision.py reuse --upn manager619
 python provision.py skus                  # license SKU IDs for config.yaml
+python provision.py capture-signature     # one-time: save your Outlook signature for --open-draft
 python provision.py terminate manager619        # preview the offboarding plan
 python provision.py terminate manager619 --yes  # actually offboard
 python provision.py terminate manager619 --yes --convert-shared  # ...keeping mail in a shared mailbox
@@ -131,7 +150,10 @@ so the admin center shows at a glance which property an account belongs to.
 Display names follow the role-account convention: accounts at a property
 display as "{title} at {property name}" (e.g. "Property Manager at Example
 Apartments"), while accounts at the corporate office (`corporate_property`
-in `config.yaml`) keep a personal "First Last" name. The login-info email
+in `config.yaml`) keep a personal "First Last" name. When a form words a
+title awkwardly, `naming.title_display` can restate it for the display name
+alone ("Concierge/Leasing" → "Leasing Concierge") — the Job title attribute
+and every matching rule keep the form's exact wording. The login-info email
 always addresses the person by name either way.
 The tool then assigns the configured license — either the flat `license_sku`,
 or rule-based `licensing` chains keyed by who the hire is (corporate property,
@@ -204,11 +226,13 @@ copies yours once: compose an empty email in Outlook (the signature inserts
 itself), subject it `signature-capture`, save it as a draft, and run the
 command — the signature's HTML and inline images are stored locally
 (git-ignored) and appended to every generated draft from then on. Re-run it
-whenever your signature changes. The email
-wording is yours to edit: copy `email_template.example.txt` to
+whenever your signature changes.
+
+The email wording is yours to edit: copy `email_template.example.txt` to
 `email_template.txt` (git-ignored, so it can carry company-specific text)
 and write what you like, using the placeholders `{name}`, `{first}`,
-`{last}`, `{username}`, and `{password}`. The first line is the subject.
+`{last}`, `{username}`, and `{password}`. The first line is the subject;
+end the body at your sign-off and let the captured signature carry the rest.
 
 `hire.yaml` (git-ignored) carries the current hire's details, copied from
 the Formstack ticket's fields — about 30 seconds of copying that replaces
@@ -225,10 +249,11 @@ property_name: Example Apartments
 # reuse mode only — the role account being handed over:
 reuse_upn: manager619
 
-# where the login info goes, and whether to CC the RPM
+# where the login info goes, and whether to CC the RPM — leave rpm_email
+# blank and it fills in from the property's rpm: in config.yaml
 login_info_email: manager619@example.com
 copy_rpm: yes
-rpm_email: rpm@example.com
+rpm_email: ""
 
 # non-M365 platforms marked on the form — printed as a manual checklist
 platforms:
