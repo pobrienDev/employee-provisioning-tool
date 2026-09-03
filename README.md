@@ -183,7 +183,28 @@ center.
 
 After provisioning, the tool prints the manual checklist of non-M365
 platforms marked on the form and a ready-to-paste login-info email (CC'ing
-the RPM when the form asks) — shown once, never saved to disk. The email
+the RPM when the form asks) — shown once, never saved to disk. The body also
+lands on the clipboard as rich text so a paste into Outlook keeps the login
+link clickable. With `--open-draft` (on `new` or `reuse`), the email is
+created directly in **your Outlook Drafts folder** via the Graph API —
+recipients, subject, formatted body, any `email_attachments` from
+`config.yaml` (say, MFA setup instructions), and your captured signature
+already in place. It appears in new Outlook, the web, and your phone like
+any other draft; nothing is sent until you open it and click Send, and
+deleting it discards it. If the draft can't be created, the printed draft
+and clipboard copy still stand.
+
+This is the tool's one delegated feature: it signs in as *you* (a
+device-code prompt, cached so it's occasional) and touches only your own
+mailbox — the app registration needs the **delegated** `Mail.ReadWrite`
+permission and "Allow public client flows" enabled, never the tenant-wide
+application version. Because Outlook only inserts signatures into mail
+composed in the client (and offers no API to read them), `capture-signature`
+copies yours once: compose an empty email in Outlook (the signature inserts
+itself), subject it `signature-capture`, save it as a draft, and run the
+command — the signature's HTML and inline images are stored locally
+(git-ignored) and appended to every generated draft from then on. Re-run it
+whenever your signature changes. The email
 wording is yours to edit: copy `email_template.example.txt` to
 `email_template.txt` (git-ignored, so it can carry company-specific text)
 and write what you like, using the placeholders `{name}`, `{first}`,

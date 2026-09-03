@@ -17,6 +17,10 @@ email_template.txt
 # Local command cheat sheet (carries company-specific workflow notes)
 cheat-sheet.html
 
+# Delegated sign-in token cache and the captured Outlook signature (personal)
+.token_cache.json
+signature/
+
 # Audit logs
 logs/
 

@@ -9,6 +9,7 @@ Commands:
   reuse                 hand an existing role account to the hire in hire.yaml
   terminate <upn>       offboard: disable, revoke sessions, strip groups/licenses
   skus                  list license SKU IDs for config.yaml
+  capture-signature     save your Outlook signature for --open-draft to append
 
 new, reuse, and terminate accept --dry-run: reads still hit the API so the
 output is realistic, but every write is replaced with a "[dry-run] would ..."
@@ -19,6 +20,7 @@ never passwords or personal contact details.
 import argparse
 import base64
 import html
+import io
 import json
 import re
 import secrets
@@ -32,10 +34,17 @@ from pathlib import Path
 
 import yaml
 
-from graph_api import AUTH_METHOD_PATHS, ConfigError, GraphClient, GraphError
+from graph_api import (
+    AUTH_METHOD_PATHS,
+    ConfigError,
+    DelegatedGraphClient,
+    GraphClient,
+    GraphError,
+)
 
 BASE_DIR = Path(__file__).parent
 LOG_DIR = BASE_DIR / "logs"
+SIGNATURE_DIR = BASE_DIR / "signature"
 USER_FIELDS = "id,displayName,userPrincipalName,accountEnabled,jobTitle,officeLocation"
 
 
@@ -513,6 +522,18 @@ def cf_html(fragment):
     ).encode("utf-8")
 
 
+def draft_body_html(body):
+    """The draft body as an HTML fragment with clickable links."""
+    linked = re.sub(
+        r"(https?://[^\s<]+)", r'<a href="\1">\1</a>', html.escape(body)
+    )
+    return (
+        '<div style="font-family:Calibri, Arial, sans-serif; font-size:11pt">'
+        + linked.replace("\n", "<br>\n")
+        + "</div>"
+    )
+
+
 def copy_draft_to_clipboard(body):
     """Put the draft body on the clipboard as rich text AND plain text.
 
@@ -526,14 +547,7 @@ def copy_draft_to_clipboard(body):
     shell = shutil.which("powershell") or shutil.which("pwsh")
     if shell is None:
         return False
-    linked = re.sub(
-        r"(https?://[^\s<]+)", r'<a href="\1">\1</a>', html.escape(body)
-    )
-    fragment = (
-        '<div style="font-family:Calibri, Arial, sans-serif; font-size:11pt">'
-        + linked.replace("\n", "<br>\n")
-        + "</div>"
-    )
+    fragment = draft_body_html(body)
     # Both formats travel over stdin as ASCII-safe JSON: nothing sensitive
     # lands on a command line or disk, and no console codepage can garble
     # it. The HTML goes as base64 of the exact UTF-8 bytes the CF_HTML
@@ -561,13 +575,92 @@ def copy_draft_to_clipboard(body):
     return result.returncode == 0
 
 
-def email_draft(hire, display_name, upn, password):
+def body_inner_html(document):
+    """The content inside an HTML document's <body>, or the input as-is."""
+    match = re.search(r"<body[^>]*>(.*)</body>", document, re.S | re.I)
+    return match.group(1) if match else document
+
+
+def load_signature():
+    """The captured signature (HTML fragment, inline images), or (None, []).
+
+    capture-signature fills the git-ignored signature\\ folder; until it
+    has run, drafts simply go out with the template's own sign-off.
+    """
+    html_path = SIGNATURE_DIR / "signature.html"
+    if not html_path.exists():
+        return None, []
+    fragment = body_inner_html(html_path.read_text(encoding="utf-8"))
+    try:
+        meta = json.loads((SIGNATURE_DIR / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        meta = []
+    attachments = [
+        {**item, "path": SIGNATURE_DIR / item["file"]}
+        for item in meta
+        if (SIGNATURE_DIR / item.get("file", "")).exists()
+    ]
+    return fragment, attachments
+
+
+def create_outlook_draft(to, cc, subject, body, attachments):
+    """Create the login-info email as a draft in the operator's own mailbox.
+
+    Uses the delegated Graph client (signs in as you; only your mailbox),
+    so the draft shows up in Outlook's Drafts folder — new Outlook, web,
+    and phone included — with the captured signature appended and the
+    configured files attached. Nothing is sent: review and Send happen in
+    Outlook, and deleting the draft discards it. Returns (webLink, warnings).
+    """
+    client = DelegatedGraphClient.from_env()
+    signature, signature_files = load_signature()
+    content = "<html><body>" + draft_body_html(body)
+    if signature:
+        content += signature
+    content += "</body></html>"
+
+    payload = {
+        "subject": subject,
+        "body": {"contentType": "HTML", "content": content},
+        "toRecipients": [{"emailAddress": {"address": to}}],
+    }
+    if cc:
+        payload["ccRecipients"] = [{"emailAddress": {"address": cc}}]
+    message = client.create_draft(payload)
+
+    warnings = []
+    for path in attachments or []:
+        file = Path(path)
+        if not file.exists():
+            warnings.append(f"attachment not found: {path}")
+            continue
+        client.add_attachment(message["id"], {
+            "@odata.type": "#microsoft.graph.fileAttachment",
+            "name": file.name,
+            "contentBytes": base64.b64encode(file.read_bytes()).decode("ascii"),
+        })
+    for item in signature_files:
+        # Re-attach the signature's images exactly as Outlook stored them —
+        # same contentId the HTML references — so the logo renders inline.
+        client.add_attachment(message["id"], {
+            "@odata.type": "#microsoft.graph.fileAttachment",
+            "name": item.get("name") or item["file"],
+            "contentBytes": base64.b64encode(item["path"].read_bytes()).decode("ascii"),
+            "contentType": item.get("contentType"),
+            "contentId": item.get("contentId"),
+            "isInline": bool(item.get("isInline", True)),
+        })
+    return message.get("webLink"), warnings
+
+
+def email_draft(hire, display_name, upn, password, config=None, open_draft=False):
     """Print a ready-to-paste login-info email. Shown once, never saved.
 
     The wording lives in email_template.txt (git-ignored, so it can carry
     company-specific text), falling back to the committed
     email_template.example.txt. Placeholders: {name}, {first}, {last},
-    {username}, {password}.
+    {username}, {password}. With open_draft, a pre-filled Outlook compose
+    window (plus config.yaml's email_attachments) opens for a manual send.
     """
     to = hire.get("login_info_email")
     if not to:
@@ -606,12 +699,29 @@ def email_draft(hire, display_name, upn, password):
 
     # First template line is the subject; the clipboard gets just the body.
     parts = rendered.rstrip().split("\n", 1)
+    subject = parts[0].strip()
     body = parts[1].lstrip("\n") if len(parts) > 1 else parts[0]
     if copy_draft_to_clipboard(body):
         print("  (body copied to the clipboard as rich text — paste into Outlook and the link stays clickable)")
     else:
         print("  (clipboard copy unavailable — after pasting in Outlook, click at the end of the link and press Enter to make it clickable)")
     audit(f"login-info email drafted for {upn}" + (" (cc RPM)" if cc else ""))
+
+    if open_draft:
+        attachments = (config or {}).get("email_attachments") or []
+        try:
+            web_link, warnings = create_outlook_draft(to, cc, subject, body, attachments)
+        except (ConfigError, GraphError) as exc:
+            act(f"could not create the Outlook draft — {exc}")
+            act("the printed draft and clipboard copy still stand")
+        else:
+            for warning in warnings:
+                act(f"outlook draft: {warning}")
+            act("draft created in your Outlook Drafts folder — review it and click Send yourself")
+            if web_link:
+                print(f"  open it directly: {web_link}")
+            if password is None:
+                print("  (dry run — the draft's password is a placeholder, not a real credential)")
 
 
 def cmd_list_users(args):
@@ -754,7 +864,10 @@ def cmd_new(args):
     )
     role_alias_note(client, hire, config, upn)
     checklist(hire)
-    email_draft(hire, f"{hire['first_name']} {hire['last_name']}", upn, password)
+    email_draft(
+        hire, f"{hire['first_name']} {hire['last_name']}", upn, password,
+        config=config, open_draft=args.open_draft,
+    )
     if issues:
         raise ProvisionError("completed with issues: " + "; ".join(issues))
 
@@ -834,7 +947,10 @@ def cmd_reuse(args):
     )
     role_alias_note(client, hire, config, upn)
     checklist(hire)
-    email_draft(hire, f"{hire['first_name']} {hire['last_name']}", upn, password)
+    email_draft(
+        hire, f"{hire['first_name']} {hire['last_name']}", upn, password,
+        config=config, open_draft=args.open_draft,
+    )
     if issues:
         raise ProvisionError("completed with issues: " + "; ".join(issues))
 
@@ -929,6 +1045,84 @@ def join_distribution_lists(upn, dls):
         act(msg)
         issues.append(msg)
     return issues
+
+
+def normalize_signature_image(data, content_type, name):
+    """Convert a WebP signature image to PNG. Returns (data, type, name).
+
+    Outlook serves signature images re-compressed as WebP (even under a
+    .png name), and its own clients then render the cid-attached WebP as a
+    broken image. PNG displays everywhere, so convert at capture time.
+    """
+    if not (data[:4] == b"RIFF" and data[8:12] == b"WEBP"):
+        return data, content_type, name
+    try:
+        from PIL import Image
+    except ImportError:
+        print("  (a WebP signature image was kept as-is — pip install pillow "
+              "and re-run capture-signature if it shows as broken)")
+        return data, content_type, name
+    buffer = io.BytesIO()
+    Image.open(io.BytesIO(data)).save(buffer, "PNG")
+    stem = name.rsplit(".", 1)[0] or "image"
+    return buffer.getvalue(), "image/png", stem + ".png"
+
+
+def cmd_capture_signature(args):
+    """Save the operator's Outlook signature for use in generated drafts.
+
+    New Outlook keeps signatures in the cloud with no supported read API,
+    and it only inserts them into mail composed in the client — so the
+    operator composes one draft (the signature inserts itself), subjects it
+    "signature-capture", saves it, and this command copies its HTML and
+    inline images into the git-ignored signature\\ folder.
+    """
+    client = DelegatedGraphClient.from_env()
+    drafts = client.find_drafts("signature-capture")
+    if not drafts:
+        raise ProvisionError(
+            "no draft with subject 'signature-capture' found — in Outlook, start "
+            "a new email (your signature inserts itself), leave the rest empty, "
+            "set that exact subject, save it as a draft, and re-run this"
+        )
+    drafts.sort(key=lambda d: d.get("lastModifiedDateTime") or "", reverse=True)
+    message = client.get_message(drafts[0]["id"], select="id,body")
+    content = (message.get("body") or {}).get("content") or ""
+    if not content.strip():
+        raise ProvisionError("the signature-capture draft has an empty body")
+
+    SIGNATURE_DIR.mkdir(exist_ok=True)
+    (SIGNATURE_DIR / "signature.html").write_text(content, encoding="utf-8")
+    referenced = set(re.findall(r"cid:([^\"'>\s]+)", content))
+    meta = []
+    for index, attachment in enumerate(client.get_attachments(drafts[0]["id"])):
+        if attachment.get("@odata.type") != "#microsoft.graph.fileAttachment":
+            continue
+        content_id = attachment.get("contentId")
+        if referenced and content_id not in referenced:
+            continue  # not part of the signature's visible HTML
+        data = base64.b64decode(attachment["contentBytes"])
+        data, content_type, name = normalize_signature_image(
+            data,
+            attachment.get("contentType"),
+            attachment.get("name") or f"image{index}",
+        )
+        filename = f"{index:02d}_" + re.sub(r"[^A-Za-z0-9._-]", "_", name)
+        (SIGNATURE_DIR / filename).write_bytes(data)
+        meta.append({
+            "file": filename,
+            "name": name,
+            "contentType": content_type,
+            "contentId": content_id,
+            "isInline": bool(attachment.get("isInline")),
+        })
+    (SIGNATURE_DIR / "meta.json").write_text(
+        json.dumps(meta, indent=2), encoding="utf-8"
+    )
+    act(f"signature captured — {len(meta)} inline image(s), saved under signature\\ (git-ignored)")
+    print("  you can delete the signature-capture draft in Outlook now.")
+    print("  if email_template.txt still ends with your typed-out signature, trim it")
+    print("  back to the sign-off line so the draft doesn't carry it twice.")
 
 
 def cmd_terminate(args):
@@ -1058,6 +1252,12 @@ def main(argv=None):
              "admin or recipient management role) instead of printing them "
              "as manual steps",
     )
+    new.add_argument(
+        "--open-draft", action="store_true",
+        help="also create the login-info email in your Outlook Drafts folder "
+             "(signs in as you) with config.yaml's email_attachments and your "
+             "captured signature — you review and click Send yourself",
+    )
     new.set_defaults(func=cmd_new)
 
     reuse = subparsers.add_parser(
@@ -1075,12 +1275,25 @@ def main(argv=None):
              "admin or recipient management role) instead of printing them "
              "as manual steps",
     )
+    reuse.add_argument(
+        "--open-draft", action="store_true",
+        help="also create the login-info email in your Outlook Drafts folder "
+             "(signs in as you) with config.yaml's email_attachments and your "
+             "captured signature — you review and click Send yourself",
+    )
     reuse.set_defaults(func=cmd_reuse)
 
     skus = subparsers.add_parser(
         "skus", help="list license SKUs and their IDs (for license_sku in config.yaml)"
     )
     skus.set_defaults(func=cmd_skus)
+
+    capture = subparsers.add_parser(
+        "capture-signature",
+        help="save your Outlook signature (from a draft subjected "
+             "'signature-capture') for --open-draft to append; signs in as you",
+    )
+    capture.set_defaults(func=cmd_capture_signature)
 
     terminate = subparsers.add_parser(
         "terminate", help="offboard an account: disable, revoke sessions, strip groups and licenses"

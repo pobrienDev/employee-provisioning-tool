@@ -9,8 +9,10 @@ and client secret from the environment — it never uses a signed-in user's
 session, so it can only ever touch the tenant configured in .env.
 """
 
+import json
 import os
 import time
+from pathlib import Path
 from urllib.parse import quote
 
 import requests
@@ -18,6 +20,13 @@ from dotenv import load_dotenv
 
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 TOKEN_URL = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+DEVICE_CODE_URL = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/devicecode"
+
+# Delegated scope for the mailbox features (drafts, signature capture):
+# Mail.ReadWrite as the signed-in user reaches that one mailbox and nothing
+# else. offline_access adds the refresh token that keeps sign-ins occasional.
+DELEGATED_SCOPE = "https://graph.microsoft.com/Mail.ReadWrite offline_access"
+TOKEN_CACHE = Path(__file__).parent / ".token_cache.json"
 
 # Registered MFA method types -> the per-type endpoint used to delete them.
 # (passwordAuthenticationMethod is deliberately absent: passwords can't be
@@ -153,6 +162,35 @@ class GraphClient:
             detail = response.text
         return f"Graph API error ({response.status_code}) — {detail}"
 
+    def create_draft(self, payload):
+        """Create a draft message in the signed-in mailbox (delegated only)."""
+        return self._request("POST", "/me/messages", json=payload).json()
+
+    def add_attachment(self, message_id, payload):
+        """Attach a file to a draft message (delegated only)."""
+        self._request(
+            "POST", f"/me/messages/{quote(message_id, safe='')}/attachments",
+            json=payload,
+        )
+
+    def find_drafts(self, subject, select="id,subject,lastModifiedDateTime"):
+        """Drafts whose subject matches exactly (delegated only)."""
+        escaped = subject.replace("'", "''")
+        params = {"$filter": f"subject eq '{escaped}'", "$select": select}
+        return self._request(
+            "GET", "/me/mailFolders/drafts/messages", params=params
+        ).json().get("value", [])
+
+    def get_message(self, message_id, select="id,subject,body"):
+        """One message from the signed-in mailbox (delegated only)."""
+        path = f"/me/messages/{quote(message_id, safe='')}?$select={select}"
+        return self._request("GET", path).json()
+
+    def get_attachments(self, message_id):
+        """A message's attachments, content included (delegated only)."""
+        path = f"/me/messages/{quote(message_id, safe='')}/attachments"
+        return self._request("GET", path).json().get("value", [])
+
     def list_users(self):
         """Return all users in the tenant, following paging links."""
         users = []
@@ -250,3 +288,123 @@ class GraphClient:
         self._request(
             "DELETE", f"/users/{user_id}/authentication/{method_path}/{method_id}"
         )
+
+
+class DelegatedGraphClient(GraphClient):
+    """Graph client acting as the signed-in operator, not the app.
+
+    Only the mailbox features (Outlook draft creation, signature capture)
+    use this: the delegated Mail.ReadWrite scope reaches the signed-in
+    user's own mailbox and nothing else, which is why the tool never asks
+    for the tenant-wide application version of that permission. Sign-in is
+    the device-code flow — a code to enter at microsoft.com/devicelogin —
+    and the refresh token is cached in .token_cache.json (git-ignored) so
+    the prompt is occasional rather than per run. Requires the app
+    registration to allow public client flows.
+    """
+
+    @classmethod
+    def from_env(cls):
+        """Build a delegated client from TENANT_ID and CLIENT_ID."""
+        load_dotenv()
+        missing = [name for name in ("TENANT_ID", "CLIENT_ID") if not os.getenv(name)]
+        if missing:
+            raise ConfigError(
+                f"missing {', '.join(missing)} — copy .env.example to .env and "
+                "fill in the app registration values"
+            )
+        return cls(os.environ["TENANT_ID"], os.environ["CLIENT_ID"], None)
+
+    def _get_token(self):
+        if self._token and time.time() < self._token_expires:
+            return self._token
+        refresh = self._cached_refresh_token()
+        if refresh and self._redeem({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh,
+            "client_id": self.client_id,
+            "scope": DELEGATED_SCOPE,
+        }):
+            return self._token
+        self._device_code_sign_in()
+        return self._token
+
+    @staticmethod
+    def _cached_refresh_token():
+        try:
+            return json.loads(TOKEN_CACHE.read_text(encoding="utf-8")).get("refresh_token")
+        except (OSError, ValueError):
+            return None
+
+    def _store(self, payload):
+        self._token = payload["access_token"]
+        self._token_expires = time.time() + int(payload.get("expires_in", 3600)) - 60
+        if payload.get("refresh_token"):
+            try:
+                TOKEN_CACHE.write_text(
+                    json.dumps({"refresh_token": payload["refresh_token"]}),
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass  # no cache just means the prompt comes back sooner
+
+    def _redeem(self, data):
+        """Try a token grant; True on success, False to fall back to sign-in."""
+        try:
+            response = self.session.post(
+                TOKEN_URL.format(tenant=self.tenant_id), data=data, timeout=30
+            )
+        except requests.RequestException as exc:
+            raise GraphError(f"cannot reach login.microsoftonline.com: {exc}") from exc
+        payload = response.json()
+        if "access_token" not in payload:
+            return False
+        self._store(payload)
+        return True
+
+    def _device_code_sign_in(self):
+        try:
+            response = self.session.post(
+                DEVICE_CODE_URL.format(tenant=self.tenant_id),
+                data={"client_id": self.client_id, "scope": DELEGATED_SCOPE},
+                timeout=30,
+            )
+        except requests.RequestException as exc:
+            raise GraphError(f"cannot reach login.microsoftonline.com: {exc}") from exc
+        if response.status_code != 200:
+            raise GraphError(
+                f"sign-in could not start ({response.status_code}): {response.text}"
+            )
+        flow = response.json()
+        print(f"\n  {flow['message']}\n")
+        interval = int(flow.get("interval", 5))
+        deadline = time.time() + int(flow.get("expires_in", 900))
+        while time.time() < deadline:
+            time.sleep(interval)
+            response = self.session.post(
+                TOKEN_URL.format(tenant=self.tenant_id),
+                data={
+                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                    "client_id": self.client_id,
+                    "device_code": flow["device_code"],
+                },
+                timeout=30,
+            )
+            payload = response.json()
+            if "access_token" in payload:
+                self._store(payload)
+                return
+            error = payload.get("error")
+            if error == "authorization_pending":
+                continue
+            if error == "slow_down":
+                interval += 5
+                continue
+            description = payload.get("error_description") or error or "unknown error"
+            if "7000218" in description:
+                raise GraphError(
+                    "sign-in refused — enable 'Allow public client flows' on the "
+                    "app registration's Authentication page"
+                )
+            raise GraphError("sign-in failed — " + description.splitlines()[0])
+        raise GraphError("sign-in timed out before the code was entered — run it again")

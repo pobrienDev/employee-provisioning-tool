@@ -34,6 +34,12 @@ license_sku: ""
 #   default: [SPB, STANDARDPACK, EXCHANGESTANDARD]
 #   maintenance_keywords: [maintenance]
 
+# Optional: files attached to the Outlook draft that new/reuse --open-draft
+# opens (e.g. MFA setup instructions). Paths with apostrophes: double them
+# inside single quotes.
+# email_attachments:
+#   - 'C:\path\to\MFA Instructions.pdf'
+
 # Groups every hire joins based on where and what they are, merged with the
 # property's own groups below (duplicates collapse):
 groups:
