@@ -261,3 +261,21 @@ platforms:
   happyco: no
   rent_cafe: yes
 ```
+
+## Testing
+
+The test suite exercises the tool's decision logic — currently collision-safe
+UPN generation — against an in-memory fake of the Graph client, so it needs
+no credentials, no `.env`, and no tenant, and makes zero network calls — so
+it's safe to run on any machine, including one whose `.env` points at
+production. From the repo root, with the venv activated:
+
+```
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
+Without activating, call the venv's interpreter directly:
+`venv/bin/python -m pytest -q` on macOS/Linux, `venv\Scripts\python -m pytest -q`
+on Windows. GitHub Actions runs the same command on every push and pull
+request (`.github/workflows/tests.yml`, Python 3.12).
