@@ -182,7 +182,13 @@ way, a just-created account can take a minute to become visible to Exchange —
 if a join fails on that, retry it a minute later.
 
 `terminate` offboards in lockout-first order: disable the account and revoke
-every session, then remove all group memberships and licenses. Without
+every session, then remove group memberships and licenses. Memberships are
+handled by kind: ordinary groups are left via Graph, distribution lists
+print as paste-ready `Remove-DistributionGroupMember` commands (Graph can't
+touch them), and dynamic groups are noted and skipped since their
+membership follows attributes. With `--convert-shared`, **every membership
+is kept** — a shared mailbox usually exists so that group and list mail
+keeps arriving. Without
 `--yes` it only prints who would be offboarded and what would happen — the
 destructive path always requires the flag. Converting the mailbox to shared
 (if mail must be retained) is printed as a manual follow-up by default, since
@@ -193,9 +199,9 @@ Shared`, then turning on both "Manage sent items" copies so mail sent as or
 on behalf of the mailbox lands in its own Sent Items), the one step that
 runs as *your* signed-in account rather than the app registration. It needs the `ExchangeOnlineManagement` module
 (`Install-Module ExchangeOnlineManagement`) and an Exchange admin role, and
-`Connect-ExchangeOnline` opens a sign-in prompt mid-run — a browser
-window, or a device code printed in the terminal (the session runs with
-the terminal attached precisely so that code is visible). If the conversion
+`Connect-ExchangeOnline` opens a browser tab for sign-in mid-run (the
+Windows account-broker popup is disabled: it needs a real console window
+to attach to, which editor terminals lack, and hangs silently without one). If the conversion
 fails, the licenses are deliberately left in place — removing a license from
 an unconverted mailbox starts its deletion clock.
 

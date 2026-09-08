@@ -5,8 +5,10 @@ GraphClient and never talks to the network directly.
 
 Auth is the OAuth 2.0 client-credentials flow (app-only): the tool
 authenticates as an Entra ID app registration using the tenant ID, client ID,
-and client secret from the environment — it never uses a signed-in user's
-session, so it can only ever touch the tenant configured in .env.
+and client secret from the environment, so it can only ever touch the tenant
+configured in .env. The one exception is DelegatedGraphClient, used solely by
+the mailbox features (drafts, signature capture): it signs the operator in
+and reaches that operator's own mailbox and nothing else.
 """
 
 import json
@@ -261,9 +263,13 @@ class GraphClient:
         self._request("DELETE", f"/groups/{group_id}/members/{user_id}/$ref")
 
     def get_member_groups(self, user_id):
-        """Return the groups the user belongs to (id and displayName)."""
+        """Return the groups the user belongs to, with enough of each
+        group's shape (types, mail settings) to tell how to leave it."""
         groups = []
-        url = f"/users/{user_id}/memberOf?$select=id,displayName"
+        url = (
+            f"/users/{user_id}/memberOf"
+            "?$select=id,displayName,groupTypes,mailEnabled,securityEnabled,mail"
+        )
         while url:
             page = self._request("GET", url).json()
             groups.extend(

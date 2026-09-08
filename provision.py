@@ -978,13 +978,16 @@ def exchange_shell(body):
         raise ProvisionError("no PowerShell found — Exchange steps need it")
     script = (
         "Import-Module ExchangeOnlineManagement -ErrorAction Stop; "
-        "Connect-ExchangeOnline -ShowBanner:$false; "
+        # -DisableWAM: the Windows account-broker popup needs a real console
+        # window to attach to, which a VS Code / pseudo-console terminal
+        # lacks — the module then waits forever. Browser sign-in works anywhere.
+        "Connect-ExchangeOnline -DisableWAM -ShowBanner:$false -ShowProgress:$false; "
         + body +
         "; Disconnect-ExchangeOnline -Confirm:$false"
     )
     print(
-        "  opening Exchange Online PowerShell — complete the sign-in when it "
-        "appears (a browser window, or a device code printed below)"
+        "  opening Exchange Online PowerShell — a browser tab will open for "
+        "sign-in; complete it and the run continues"
     )
     sys.stdout.flush()
     try:
@@ -1159,6 +1162,19 @@ def cmd_capture_signature(args):
     print("  back to the sign-off line so the draft doesn't carry it twice.")
 
 
+def group_kind(group):
+    """How a membership can be ended: "graph" (normal group, removable via
+    Graph), "exchange" (distribution list or mail-enabled security group —
+    Exchange-only), or "dynamic" (membership follows attributes; nothing
+    to remove by hand)."""
+    types = group.get("groupTypes") or []
+    if "DynamicMembership" in types:
+        return "dynamic"
+    if group.get("mailEnabled") and "Unified" not in types:
+        return "exchange"
+    return "graph"
+
+
 def cmd_terminate(args):
     config = load_config()
     client = GraphClient.from_env()
@@ -1176,6 +1192,31 @@ def cmd_terminate(args):
 
     groups = client.get_member_groups(user["id"])
     licenses = [lic["skuId"] for lic in user.get("assignedLicenses") or []]
+    # A shared mailbox usually exists so that mail keeps arriving — its
+    # group and distribution-list memberships stay put.
+    keep_groups = args.convert_shared
+    removable = [] if keep_groups else [g for g in groups if group_kind(g) == "graph"]
+    exchange = [] if keep_groups else [g for g in groups if group_kind(g) == "exchange"]
+    dynamic = [] if keep_groups else [g for g in groups if group_kind(g) == "dynamic"]
+
+    def label(group):
+        return group.get("displayName") or group["id"]
+
+    def exchange_notes():
+        for group in dynamic:
+            act(f"{label(group)} is a dynamic group — membership follows attributes, nothing to remove")
+        if exchange:
+            act(
+                f"{len(exchange)} distribution list removal(s) printed below — paste "
+                "into an Exchange Online PowerShell window (Connect-ExchangeOnline once)"
+            )
+            member = upn.replace("'", "''")
+            for group in exchange:
+                identity = str(group.get("mail") or group["id"]).replace("'", "''")
+                print(
+                    f"    Remove-DistributionGroupMember -Identity '{identity}' "
+                    f"-Member '{member}' -Confirm:$false  # {label(group)}"
+                )
 
     print("Terminating:")
     print_user(user)
@@ -1187,8 +1228,10 @@ def cmd_terminate(args):
                 "[dry-run] would convert the mailbox to shared and turn on both "
                 "sent-items copies (Exchange Online PowerShell, signed in as you)"
             )
-        for group in groups:
-            act(f"[dry-run] would remove from group: {group.get('displayName') or group['id']}")
+            act(f"[dry-run] would keep all {len(groups)} group/list membership(s) — a shared mailbox keeps receiving their mail")
+        for group in removable:
+            act(f"[dry-run] would remove from group: {label(group)}")
+        exchange_notes()
         if licenses:
             act(f"[dry-run] would remove {len(licenses)} license(s)")
         else:
@@ -1197,10 +1240,16 @@ def cmd_terminate(args):
             print("  manual step if mail must be retained: convert the mailbox to shared (Exchange admin center)")
         return
 
+    if keep_groups:
+        group_plan = f"keep all {len(groups)} group/list membership(s)"
+    else:
+        group_plan = f"remove {len(removable)} group membership(s)"
+        if exchange:
+            group_plan += f" (+{len(exchange)} distribution list(s) as paste-ready commands)"
     print(
         f"  plan: disable account, revoke sessions,"
-        f"{' convert the mailbox to shared,' if args.convert_shared else ''} remove "
-        f"{len(groups)} group membership(s), remove {len(licenses)} license(s)"
+        f"{' convert the mailbox to shared,' if args.convert_shared else ''} "
+        f"{group_plan}, remove {len(licenses)} license(s)"
     )
     if not args.yes:
         raise ProvisionError("nothing done — re-run with --yes to offboard this account")
@@ -1222,16 +1271,17 @@ def cmd_terminate(args):
         except ProvisionError as exc:
             act(str(exc))
             issues.append(str(exc))
+        act(f"kept all {len(groups)} group/list membership(s) — the shared mailbox keeps receiving their mail")
 
-    for group in groups:
-        label = group.get("displayName") or group["id"]
+    for group in removable:
         try:
             client.remove_group_member(group["id"], user["id"])
-            act(f"removed from group: {label}")
+            act(f"removed from group: {label(group)}")
         except GraphError as exc:
-            msg = f"could not remove from {label}: {exc}"
+            msg = f"could not remove from {label(group)}: {exc}"
             act(msg)
             issues.append(msg)
+    exchange_notes()
 
     if not licenses:
         act("no licenses to remove")
