@@ -988,8 +988,18 @@ def exchange_shell(body):
 
 def convert_mailbox_shared(upn):
     """Convert the account's mailbox to a shared mailbox (terminate's
-    opt-in --convert-shared)."""
-    result = exchange_shell(f"Set-Mailbox -Identity '{upn}' -Type Shared -ErrorAction Stop")
+    opt-in --convert-shared).
+
+    Also turns on both "Manage sent items" copies — mail sent as the
+    mailbox and mail sent on its behalf land in its own Sent Items — so
+    whoever inherits the shared mailbox keeps a complete record.
+    """
+    quoted = upn.replace("'", "''")
+    result = exchange_shell(
+        f"Set-Mailbox -Identity '{quoted}' -Type Shared -ErrorAction Stop; "
+        f"Set-Mailbox -Identity '{quoted}' -MessageCopyForSentAsEnabled $true "
+        "-MessageCopyForSendOnBehalfEnabled $true -ErrorAction Stop"
+    )
     if result.returncode != 0:
         lines = (result.stderr or result.stdout or "").strip().splitlines()
         detail = lines[-1].strip() if lines else f"exit code {result.returncode}"
@@ -1150,8 +1160,8 @@ def cmd_terminate(args):
         act("[dry-run] would disable the account and revoke every session")
         if args.convert_shared:
             act(
-                "[dry-run] would convert the mailbox to shared "
-                "(Exchange Online PowerShell, signed in as you)"
+                "[dry-run] would convert the mailbox to shared and turn on both "
+                "sent-items copies (Exchange Online PowerShell, signed in as you)"
             )
         for group in groups:
             act(f"[dry-run] would remove from group: {group.get('displayName') or group['id']}")
@@ -1183,7 +1193,7 @@ def cmd_terminate(args):
         # 50GB then needs no license of its own.
         try:
             convert_mailbox_shared(upn)
-            act("mailbox converted to shared")
+            act("mailbox converted to shared — sent-as and send-on-behalf copies enabled")
             converted = True
         except ProvisionError as exc:
             act(str(exc))

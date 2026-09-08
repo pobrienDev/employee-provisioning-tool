@@ -189,8 +189,9 @@ destructive path always requires the flag. Converting the mailbox to shared
 mailbox type is an Exchange setting outside the Graph v1.0 API. Opt in with
 `--convert-shared` and the tool does it for you between lockout and license
 removal — by shelling out to Exchange Online PowerShell (`Set-Mailbox -Type
-Shared`), the one step that runs as *your* signed-in account rather than the
-app registration. It needs the `ExchangeOnlineManagement` module
+Shared`, then turning on both "Manage sent items" copies so mail sent as or
+on behalf of the mailbox lands in its own Sent Items), the one step that
+runs as *your* signed-in account rather than the app registration. It needs the `ExchangeOnlineManagement` module
 (`Install-Module ExchangeOnlineManagement`) and an Exchange admin role, and
 `Connect-ExchangeOnline` opens a sign-in prompt mid-run. If the conversion
 fails, the licenses are deliberately left in place — removing a license from
