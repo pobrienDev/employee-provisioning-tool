@@ -193,7 +193,9 @@ Shared`, then turning on both "Manage sent items" copies so mail sent as or
 on behalf of the mailbox lands in its own Sent Items), the one step that
 runs as *your* signed-in account rather than the app registration. It needs the `ExchangeOnlineManagement` module
 (`Install-Module ExchangeOnlineManagement`) and an Exchange admin role, and
-`Connect-ExchangeOnline` opens a sign-in prompt mid-run. If the conversion
+`Connect-ExchangeOnline` opens a sign-in prompt mid-run — a browser
+window, or a device code printed in the terminal (the session runs with
+the terminal attached precisely so that code is visible). If the conversion
 fails, the licenses are deliberately left in place — removing a license from
 an unconverted mailbox starts its deletion clock.
 

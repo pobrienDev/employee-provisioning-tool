@@ -22,12 +22,14 @@ import base64
 import html
 import io
 import json
+import os
 import re
 import secrets
 import shutil
 import string
 import subprocess
 import sys
+import tempfile
 import unicodedata
 from datetime import datetime
 from pathlib import Path
@@ -962,8 +964,14 @@ def exchange_shell(body):
     settings the Graph API can't write, so those steps shell out to the
     ExchangeOnlineManagement module — the only place the tool acts as the
     signed-in operator rather than the app registration, and always behind
-    an opt-in flag. Connect-ExchangeOnline opens a sign-in prompt; the
-    operator needs an Exchange admin (or recipient management) role.
+    an opt-in flag. The operator needs an Exchange admin (or recipient
+    management) role.
+
+    The session runs with the terminal attached — output is deliberately
+    NOT captured. Connect-ExchangeOnline may open a browser, or fall back
+    to printing a device code and waiting for it; with output captured
+    that code was invisible and the run looked hung. Callers that need
+    per-step results have the script write them to a file.
     """
     shell = shutil.which("powershell") or shutil.which("pwsh")
     if shell is None:
@@ -974,10 +982,14 @@ def exchange_shell(body):
         + body +
         "; Disconnect-ExchangeOnline -Confirm:$false"
     )
+    print(
+        "  opening Exchange Online PowerShell — complete the sign-in when it "
+        "appears (a browser window, or a device code printed below)"
+    )
+    sys.stdout.flush()
     try:
         return subprocess.run(
-            [shell, "-NoProfile", "-Command", script],
-            capture_output=True, text=True, timeout=600,
+            [shell, "-NoProfile", "-Command", script], timeout=600,
         )
     except subprocess.TimeoutExpired as exc:
         raise ProvisionError(
@@ -1001,10 +1013,8 @@ def convert_mailbox_shared(upn):
         "-MessageCopyForSendOnBehalfEnabled $true -ErrorAction Stop"
     )
     if result.returncode != 0:
-        lines = (result.stderr or result.stdout or "").strip().splitlines()
-        detail = lines[-1].strip() if lines else f"exit code {result.returncode}"
         raise ProvisionError(
-            f"mailbox conversion failed — {detail} (is the "
+            "mailbox conversion failed — see the Exchange output above (is the "
             "ExchangeOnlineManagement module installed, and do you hold an "
             "Exchange admin role?)"
         )
@@ -1016,28 +1026,42 @@ def join_distribution_lists(upn, dls):
 
     dls is a list of (identity, label) pairs where identity is the group's
     SMTP address — the identity Exchange resolves unambiguously — with the
-    object ID as a fallback. Already-a-member counts as joined. Returns a
-    list of issues; each outcome is reported through act().
+    object ID as a fallback. Already-a-member counts as joined. Per-list
+    results come back through a temp file, since the session's console
+    output is left visible for the sign-in. Returns a list of issues; each
+    outcome is reported through act().
     """
     quoted_upn = upn.replace("'", "''")
+    handle, results_path = tempfile.mkstemp(prefix="provision-dls-", suffix=".txt")
+    os.close(handle)
+    quoted_path = results_path.replace("'", "''")
     body = "; ".join(
         f"try {{ Add-DistributionGroupMember -Identity '{gid}' "
-        f"-Member '{quoted_upn}' -ErrorAction Stop; Write-Output 'JOINED {gid}' }} "
+        f"-Member '{quoted_upn}' -ErrorAction Stop; "
+        f"Add-Content -Path '{quoted_path}' -Value 'JOINED {gid}' }} "
         f"catch {{ if (\"$_\" -match 'already a member') "
-        f"{{ Write-Output 'JOINED {gid}' }} else "
-        f"{{ Write-Output ('FAILED {gid} ' + $_) }} }}"
+        f"{{ Add-Content -Path '{quoted_path}' -Value 'JOINED {gid}' }} else "
+        f"{{ Add-Content -Path '{quoted_path}' -Value ('FAILED {gid} ' + $_) }} }}"
         for gid, _ in dls
     )
-    result = exchange_shell(body)
-    out = result.stdout or ""
+    try:
+        result = exchange_shell(body)
+        try:
+            out = Path(results_path).read_text(encoding="utf-8")
+        except OSError:
+            out = ""
+    finally:
+        try:
+            os.remove(results_path)
+        except OSError:
+            pass
 
-    if result.returncode != 0 and "JOINED" not in out and "FAILED" not in out:
-        lines = (result.stderr or out).strip().splitlines()
-        detail = lines[-1].strip() if lines else f"exit code {result.returncode}"
+    if "JOINED" not in out and "FAILED" not in out:
         msg = (
-            f"distribution list joins failed — {detail} (is the "
-            "ExchangeOnlineManagement module installed, and do you hold an "
-            "Exchange admin or recipient management role?)"
+            "distribution list joins failed — see the Exchange output above "
+            f"(exit code {result.returncode}; is the ExchangeOnlineManagement "
+            "module installed, and do you hold an Exchange admin or recipient "
+            "management role?)"
         )
         act(msg)
         return [msg]
