@@ -141,24 +141,65 @@ def sanitize_local(text):
     return "".join(ch for ch in ascii_text if ch.isalnum()).lower()
 
 
+def property_numbers(value):
+    """The property numbers named by a property_number value, in order.
+
+    Some properties are run as one and written on the form as a pair —
+    "720/721" — so a value may name several numbers; any non-digit run
+    separates them. Returns a list of strings (empty when absent).
+    """
+    return re.findall(r"\d+", str(value or ""))
+
+
+def property_label(value):
+    """The property number as stamped on the account: "720", or "720/721"
+    for a joined pair, normalized regardless of how the form spaced it."""
+    return "/".join(property_numbers(value))
+
+
+def is_corporate(hire, config):
+    """True when the hire belongs to the corporate office property."""
+    corporate = str(config.get("corporate_property") or "50")
+    return property_numbers(hire.get("property_number")) == [corporate]
+
+
+def property_entries(hire, config):
+    """The config entries for each of the hire's property numbers."""
+    properties = {str(k): v for k, v in (config.get("properties") or {}).items()}
+    numbers = property_numbers(hire.get("property_number"))
+    return [
+        entry for entry in (properties.get(n) for n in numbers)
+        if isinstance(entry, dict)
+    ]
+
+
 def enrich_from_property(hire, config):
     """Fill in hire fields the config property list can supply when absent.
 
     property_name comes from the property entry's name and rpm_email from
     its rpm, so hire.yaml only needs the property number once config.yaml
-    knows the property. Explicit values in hire.yaml still win.
+    knows the property. A joined pair like "720/721" takes its display
+    name from joined_properties (falling back to the two names joined
+    with "&") and CCs every distinct RPM. Explicit values still win.
     """
-    if not hire.get("property_number"):
-        return hire
-    properties = {str(k): v for k, v in (config.get("properties") or {}).items()}
-    entry = properties.get(str(hire["property_number"]))
-    if not isinstance(entry, dict):
+    entries = property_entries(hire, config)
+    if not entries:
         return hire
     hire = dict(hire)
-    if not hire.get("property_name") and entry.get("name"):
-        hire["property_name"] = entry["name"]
-    if not hire.get("rpm_email") and entry.get("rpm"):
-        hire["rpm_email"] = entry["rpm"]
+    label = property_label(hire.get("property_number"))
+    if not hire.get("property_name"):
+        joined = {str(k): v for k, v in (config.get("joined_properties") or {}).items()}
+        override = joined.get(label) or joined.get("/".join(reversed(label.split("/"))))
+        if isinstance(override, dict) and override.get("name"):
+            hire["property_name"] = override["name"]
+        else:
+            names = [e["name"] for e in entries if e.get("name")]
+            if names:
+                hire["property_name"] = " & ".join(names)
+    if not hire.get("rpm_email"):
+        rpms = list(dict.fromkeys(e["rpm"] for e in entries if e.get("rpm")))
+        if rpms:
+            hire["rpm_email"] = "; ".join(rpms)
     return hire
 
 
@@ -188,9 +229,8 @@ def display_name_for(hire, config):
     keeps "First Last". Falls back to the personal name when title or
     property name is missing.
     """
-    prop = str(hire.get("property_number") or "")
-    corporate = str(config.get("corporate_property") or "50")
-    if prop and prop != corporate and hire.get("title") and hire.get("property_name"):
+    at_property = bool(property_numbers(hire.get("property_number"))) and not is_corporate(hire, config)
+    if at_property and hire.get("title") and hire.get("property_name"):
         return f"{display_title(hire, config)} at {hire['property_name']}"
     return f"{hire['first_name']} {hire['last_name']}"
 
@@ -227,7 +267,8 @@ def pick_upn(client, hire, config):
 def groups_for(hire, config):
     """Every group the hire should join, from three sources:
 
-    - the property's own groups (properties.<number>.groups)
+    - the property's own groups (properties.<number>.groups — every
+      property of a joined pair like "720/721")
     - corporate or site membership (groups.corporate / groups.site,
       chosen by comparing property_number to corporate_property)
     - the job title (groups.titles, case-insensitive exact match)
@@ -235,16 +276,13 @@ def groups_for(hire, config):
     Duplicates are collapsed, order preserved.
     """
     selected = []
-    prop = str(hire.get("property_number") or "")
-    corporate = str(config.get("corporate_property") or "50")
     group_cfg = config.get("groups") or {}
 
-    if prop:
-        properties = {str(k): v for k, v in (config.get("properties") or {}).items()}
-        mapping = properties.get(prop)
-        if isinstance(mapping, dict):
-            selected += mapping.get("groups") or []
-        selected += group_cfg.get("corporate" if prop == corporate else "site") or []
+    if property_numbers(hire.get("property_number")):
+        # A joined pair contributes both properties' groups.
+        for entry in property_entries(hire, config):
+            selected += entry.get("groups") or []
+        selected += group_cfg.get("corporate" if is_corporate(hire, config) else "site") or []
 
     title = (hire.get("title") or "").strip().lower()
     if title:
@@ -276,12 +314,10 @@ def choose_license(client, config, hire):
             return None, None, ["license skipped — no licensing rules in config.yaml"], None
         return sku, str(sku), [], None
 
-    prop = str(hire.get("property_number") or "")
-    corporate = str(config.get("corporate_property") or "50")
     title = (hire.get("title") or "").lower()
     keywords = [str(k).lower() for k in licensing.get("maintenance_keywords") or ["maintenance"]]
 
-    if prop and prop == corporate:
+    if is_corporate(hire, config):
         chain, which = licensing.get("corporate"), "corporate"
     elif any(keyword in title for keyword in keywords):
         chain, which = licensing.get("maintenance"), "maintenance"
@@ -627,7 +663,10 @@ def create_outlook_draft(to, cc, subject, body, attachments):
         "toRecipients": [{"emailAddress": {"address": to}}],
     }
     if cc:
-        payload["ccRecipients"] = [{"emailAddress": {"address": cc}}]
+        payload["ccRecipients"] = [
+            {"emailAddress": {"address": address.strip()}}
+            for address in re.split(r"[;,]", cc) if address.strip()
+        ]
     message = client.create_draft(payload)
 
     warnings = []
@@ -742,14 +781,17 @@ def cmd_discover(args):
     config = load_config()
     client = GraphClient.from_env()
 
-    if args.target.isdigit():
+    numbers = property_numbers(args.target)
+    if numbers and re.fullmatch(r"[\d\s/,+&-]+", args.target):
+        # A property number — or a joined pair like 720/721 — checks each
+        # role prefix at every number named.
         roles = (config.get("naming") or {}).get("roles") or []
         if not roles:
             raise ProvisionError(
                 "no naming.roles in config.yaml — add the role-account prefixes "
                 "to search by property number"
             )
-        prefixes = [f"{role}{args.target}" for role in roles]
+        prefixes = [f"{role}{number}" for number in numbers for role in roles]
     else:
         prefixes = [args.target]
 
@@ -842,8 +884,8 @@ def cmd_new(args):
             payload["jobTitle"] = hire["title"]
         if hire.get("property_name"):
             payload["officeLocation"] = hire["property_name"]
-        if hire.get("property_number"):
-            payload["department"] = str(hire["property_number"])
+        if property_numbers(hire.get("property_number")):
+            payload["department"] = property_label(hire["property_number"])
 
         try:
             created = client.create_user(payload)
@@ -935,8 +977,8 @@ def cmd_reuse(args):
         }
         if hire.get("title"):
             changes["jobTitle"] = hire["title"]
-        if hire.get("property_number"):
-            changes["department"] = str(hire["property_number"])
+        if property_numbers(hire.get("property_number")):
+            changes["department"] = property_label(hire["property_number"])
         client.update_user(user["id"], changes)
 
         act(f"now: {display_name} — password reset, sessions revoked, account enabled")

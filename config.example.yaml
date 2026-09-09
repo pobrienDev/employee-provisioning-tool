@@ -53,6 +53,14 @@ groups:
     "Maintenance Technician":
       - "00000000-0000-0000-0000-000000000006"  # Maintenance
 
+# Optional: properties run as one. A hire can be entered with the pair as the
+# form writes it ("101/102"); groups and RPM CCs merge from both entries below,
+# Department is stamped "101/102", and this supplies the combined display name
+# (without an entry the two names are joined with "&").
+# joined_properties:
+#   "101/102":
+#     name: Example & Example Annex
+
 # Property number -> groups specific to that property. An optional rpm: is
 # the property's Regional Property Manager, CC'd on login-info emails when
 # hire.yaml asks (copy_rpm) and gives no rpm_email of its own.

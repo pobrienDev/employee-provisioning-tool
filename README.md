@@ -147,6 +147,12 @@ renaming and re-enabling the account.
 Either path stamps the hire's details onto the account's contact fields:
 title → Job title, property name → Office, property number → Department —
 so the admin center shows at a glance which property an account belongs to.
+Properties run as one can be entered as the pair the form writes
+(`property_number: "720/721"`): the account is stamped with Department
+`720/721`, joins both properties' groups, CCs every distinct RPM, and takes
+its display name from `joined_properties` in `config.yaml` (or the two names
+joined with "&" when there's no entry). `discover 720/721` checks the role
+prefixes at both numbers.
 Display names follow the role-account convention: accounts at a property
 display as "{title} at {property name}" (e.g. "Property Manager at Example
 Apartments"), while accounts at the corporate office (`corporate_property`
@@ -251,7 +257,7 @@ the whole portal walk-through (until Phase 6 pulls them automatically):
 first_name: Taylor
 last_name: Example
 title: Property Manager
-property_number: 619
+property_number: 619          # or a joined pair as the form writes it: "720/721"
 # property_name is optional when config.yaml's property list has the number —
 # the tool fills it in from there (an explicit value here still wins)
 property_name: Example Apartments
