@@ -452,19 +452,25 @@ def provision_extras(client, config, hire, user_id, dry, upn=None, join_dls=Fals
             # Paste-ready commands beat a per-run sign-in: connect once per
             # day, then each hire's joins are a two-second paste. (The
             # admin center's Assign memberships panel works too.)
-            act(
-                f"{len(pending_dls)} distribution list join(s) printed below — "
-                "paste into an Exchange Online PowerShell window "
-                "(Connect-ExchangeOnline once, then reuse the session)"
-            )
-            member = (upn or "<upn>").replace("'", "''")
-            for identity, label in pending_dls:
-                quoted = str(identity).replace("'", "''")
-                print(
-                    f"    Add-DistributionGroupMember -Identity '{quoted}' "
-                    f"-Member '{member}'  # {label}"
-                )
+            print_dl_joins(upn, pending_dls)
     return issues
+
+
+def print_dl_joins(upn, dls):
+    """Print paste-ready Add-DistributionGroupMember lines for an Exchange
+    Online PowerShell window (Connect-ExchangeOnline once, reuse the session)."""
+    act(
+        f"{len(dls)} distribution list join(s) printed below — paste into an "
+        "Exchange Online PowerShell window (Connect-ExchangeOnline once, then "
+        "reuse the session)"
+    )
+    member = (upn or "<upn>").replace("'", "''")
+    for identity, label in dls:
+        quoted = str(identity).replace("'", "''")
+        print(
+            f"    Add-DistributionGroupMember -Identity '{quoted}' "
+            f"-Member '{member}'  # {label}"
+        )
 
 
 def reset_mfa(client, user_id, dry):
@@ -1011,32 +1017,46 @@ def exchange_shell(body):
     an opt-in flag. The operator needs an Exchange admin (or recipient
     management) role.
 
-    The session runs with the terminal attached — output is deliberately
-    NOT captured. Connect-ExchangeOnline may open a browser, or fall back
-    to printing a device code and waiting for it; with output captured
-    that code was invisible and the run looked hung. Callers that need
-    per-step results have the script write them to a file.
+    Sign-in depends on which PowerShell is installed. PowerShell 7 gets the
+    device-code flow: pure text, works in any terminal. Windows PowerShell
+    5.1 signs in through the Windows account broker, which needs a real
+    console window to attach to — an editor's pseudo-console hangs it, and
+    the module's -DisableWAM fallback is a legacy browser control that
+    sign-in pages reject — so the session gets a console window of its own.
+    Output is never captured; callers needing per-step results have the
+    script write them to a file.
     """
-    shell = shutil.which("powershell") or shutil.which("pwsh")
-    if shell is None:
+    pwsh = shutil.which("pwsh")
+    powershell = shutil.which("powershell")
+    if pwsh:
+        shell, flags = pwsh, 0
+        connect = "Connect-ExchangeOnline -Device -ShowBanner:$false -ShowProgress:$false"
+        on_error = ""
+        print(
+            "  opening Exchange Online PowerShell — a device code will print below; "
+            "enter it at the URL shown and the run continues"
+        )
+    elif powershell:
+        shell, flags = powershell, getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+        connect = "Connect-ExchangeOnline -ShowBanner:$false -ShowProgress:$false"
+        # The window closes on exit; hold it open on failure so the error is readable.
+        on_error = "Write-Host 'Exchange step failed - press Enter to close'; Read-Host | Out-Null; "
+        print(
+            "  opening Exchange Online PowerShell in its own window — complete the "
+            "sign-in there; this run continues when it finishes"
+        )
+    else:
         raise ProvisionError("no PowerShell found — Exchange steps need it")
     script = (
-        "Import-Module ExchangeOnlineManagement -ErrorAction Stop; "
-        # -DisableWAM: the Windows account-broker popup needs a real console
-        # window to attach to, which a VS Code / pseudo-console terminal
-        # lacks — the module then waits forever. Browser sign-in works anywhere.
-        "Connect-ExchangeOnline -DisableWAM -ShowBanner:$false -ShowProgress:$false; "
-        + body +
-        "; Disconnect-ExchangeOnline -Confirm:$false"
-    )
-    print(
-        "  opening Exchange Online PowerShell — a browser tab will open for "
-        "sign-in; complete it and the run continues"
+        "try { Import-Module ExchangeOnlineManagement -ErrorAction Stop; "
+        + connect + "; " + body + " } "
+        "catch { Write-Host $_ -ForegroundColor Red; " + on_error + "exit 1 } "
+        "finally { Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue }"
     )
     sys.stdout.flush()
     try:
         return subprocess.run(
-            [shell, "-NoProfile", "-Command", script], timeout=600,
+            [shell, "-NoProfile", "-Command", script], timeout=600, creationflags=flags,
         )
     except subprocess.TimeoutExpired as exc:
         raise ProvisionError(
@@ -1105,15 +1125,17 @@ def join_distribution_lists(upn, dls):
 
     if "JOINED" not in out and "FAILED" not in out:
         msg = (
-            "distribution list joins failed — see the Exchange output above "
+            "distribution list joins failed — see the Exchange output "
             f"(exit code {result.returncode}; is the ExchangeOnlineManagement "
             "module installed, and do you hold an Exchange admin or recipient "
             "management role?)"
         )
         act(msg)
+        print_dl_joins(upn, dls)  # so the hire can still be finished by hand
         return [msg]
 
     issues = []
+    failed = []
     for gid, label in dls:
         if f"JOINED {gid}" in out:
             act(f"added to distribution list: {label}")
@@ -1125,6 +1147,9 @@ def join_distribution_lists(upn, dls):
         msg = f"could not add to {label}: {detail}"
         act(msg)
         issues.append(msg)
+        failed.append((gid, label))
+    if failed:
+        print_dl_joins(upn, failed)
     return issues
 
 

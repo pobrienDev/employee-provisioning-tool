@@ -205,9 +205,14 @@ Shared`, then turning on both "Manage sent items" copies so mail sent as or
 on behalf of the mailbox lands in its own Sent Items), the one step that
 runs as *your* signed-in account rather than the app registration. It needs the `ExchangeOnlineManagement` module
 (`Install-Module ExchangeOnlineManagement`) and an Exchange admin role, and
-`Connect-ExchangeOnline` opens a browser tab for sign-in mid-run (the
-Windows account-broker popup is disabled: it needs a real console window
-to attach to, which editor terminals lack, and hangs silently without one). If the conversion
+`Connect-ExchangeOnline` prompts for sign-in mid-run. With PowerShell 7
+installed that's a device code printed in the terminal; with Windows
+PowerShell 5.1 the session opens in a console window of its own, because
+its Windows account-broker sign-in needs a real window to attach to (an
+editor's terminal hangs it, and the module's browser fallback is a legacy
+control that sign-in pages reject). If an automatic join fails for any
+reason, the paste-ready commands print anyway so the hire can be finished
+by hand. If the conversion
 fails, the licenses are deliberately left in place — removing a license from
 an unconverted mailbox starts its deletion clock.
 
