@@ -100,7 +100,9 @@ def load_hire():
     missing = [field for field in ("first_name", "last_name") if not hire.get(field)]
     if missing:
         raise ProvisionError(f"hire.yaml is missing {', '.join(missing)}")
-    return hire
+    # Stray whitespace from copy-paste would otherwise reach the account's
+    # attributes and defeat title matching.
+    return {k: v.strip() if isinstance(v, str) else v for k, v in hire.items()}
 
 
 def temp_password():
