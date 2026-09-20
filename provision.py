@@ -1102,15 +1102,24 @@ def join_distribution_lists(upn, dls):
     handle, results_path = tempfile.mkstemp(prefix="provision-dls-", suffix=".txt")
     os.close(handle)
     quoted_path = results_path.replace("'", "''")
-    body = "; ".join(
-        f"try {{ Add-DistributionGroupMember -Identity '{gid}' "
-        f"-Member '{quoted_upn}' -ErrorAction Stop; "
-        f"Add-Content -Path '{quoted_path}' -Value 'JOINED {gid}' }} "
-        f"catch {{ if (\"$_\" -match 'already a member') "
-        f"{{ Add-Content -Path '{quoted_path}' -Value 'JOINED {gid}' }} else "
-        f"{{ Add-Content -Path '{quoted_path}' -Value ('FAILED {gid} ' + $_) }} }}"
-        for gid, _ in dls
-    )
+
+    def clause(gid):
+        # Every value lands inside a single-quoted PowerShell string, where
+        # the only special character is the apostrophe — legal in an SMTP
+        # address (o'brien-team@...), and doubled to stay literal. PowerShell
+        # un-doubles it when writing the results file, so the markers read
+        # back below still carry the address exactly as configured.
+        quoted_gid = str(gid).replace("'", "''")
+        return (
+            f"try {{ Add-DistributionGroupMember -Identity '{quoted_gid}' "
+            f"-Member '{quoted_upn}' -ErrorAction Stop; "
+            f"Add-Content -Path '{quoted_path}' -Value 'JOINED {quoted_gid}' }} "
+            f"catch {{ if (\"$_\" -match 'already a member') "
+            f"{{ Add-Content -Path '{quoted_path}' -Value 'JOINED {quoted_gid}' }} else "
+            f"{{ Add-Content -Path '{quoted_path}' -Value ('FAILED {quoted_gid} ' + $_) }} }}"
+        )
+
+    body = "; ".join(clause(gid) for gid, _ in dls)
     try:
         result = exchange_shell(body)
         try:
