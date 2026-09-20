@@ -301,6 +301,10 @@ at production. It covers three areas:
   and backoff on 429/503/504, the directory-concurrency retry, giving up
   after three attempts, error-message extraction, and `@odata.nextLink`
   paging.
+- **Distribution list joins** (`tests/test_distribution_lists.py`): a fake
+  of the Exchange session checks the PowerShell the tool generates — every
+  value stays inside its single-quoted string even with an apostrophe in a
+  list address — plus the joined, failed, and session-never-ran outcomes.
 - **UPN generation** (`tests/test_upn_generation.py`): the collision-safe
   username ladder.
 
