@@ -284,11 +284,27 @@ platforms:
 
 ## Testing
 
-The test suite exercises the tool's decision logic — currently collision-safe
-UPN generation — against an in-memory fake of the Graph client, so it needs
-no credentials, no `.env`, and no tenant, and makes zero network calls — so
-it's safe to run on any machine, including one whose `.env` points at
-production. From the repo root, with the venv activated:
+The test suite exercises the tool's decision logic against in-memory fakes,
+so it needs no credentials, no `.env`, and no tenant, and makes zero network
+calls — so it's safe to run on any machine, including one whose `.env` points
+at production. It covers three areas:
+
+- **Offboarding** (`tests/test_terminate.py`): a recording fake of the Graph
+  client asserts the *order* of operations — disable and revoke sessions
+  first, then memberships, then licenses. It also checks that a preview or
+  `--dry-run` writes nothing, that only Graph-managed groups are removed
+  (distribution lists come back as paste-ready commands, dynamic groups are
+  left alone), that one failed group removal doesn't stop the rest, and that
+  a failed `--convert-shared` leaves the licenses in place.
+- **The Graph client** (`tests/test_graph_client.py`): a scripted fake of
+  `requests.Session` covers token caching and early refresh, `Retry-After`
+  and backoff on 429/503/504, the directory-concurrency retry, giving up
+  after three attempts, error-message extraction, and `@odata.nextLink`
+  paging.
+- **UPN generation** (`tests/test_upn_generation.py`): the collision-safe
+  username ladder.
+
+From the repo root, with the venv activated:
 
 ```
 python -m pip install -r requirements-dev.txt
