@@ -30,7 +30,7 @@ license_sku: ""
 # SKU or nothing".
 # licensing:
 #   corporate: [SPB]
-#   maintenance: [STANDARDPACK, EXCHANGESTANDARD]
+#   maintenance: [STANDARDPACK, EXCHANGESTANDARD, SPB]
 #   default: [SPB, STANDARDPACK, EXCHANGESTANDARD]
 #   maintenance_keywords: [maintenance]
 
