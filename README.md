@@ -57,7 +57,7 @@ one reviewed command.
 | 4 | Offboarding: `terminate` — disable, revoke sessions, strip groups and licenses | **done** |
 | 5 | `--dry-run`, audit logging, per-hire checklist, login-info email draft | **done** |
 | 5+ | Extras: rule-based licensing, DL joins (`--join-dls`), shared-mailbox conversion (`--convert-shared`), clipboard-ready email, Outlook draft with captured signature (`--open-draft`) | **done** |
-| 6 | Zendesk integration (pull the Formstack fields from the ticket automatically) | stretch |
+| 6 | Zendesk integration (pull the Formstack fields from the ticket automatically) (inconsistent submissions) | stretch |
 
 ## Setup
 
