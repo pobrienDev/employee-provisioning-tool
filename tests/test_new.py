@@ -137,3 +137,18 @@ def test_duplicate_upn_from_graph_points_at_reuse(wire, capsys):
     err = capsys.readouterr().err
     assert "texample@example.com already exists" in err
     assert "reuse --upn texample --yes --force" in err
+
+
+# --- dry run --------------------------------------------------------------------------
+
+def test_dry_run_writes_nothing_and_rehearses_the_email(wire, monkeypatch, capsys):
+    client = wire(FakeGraph())
+    drafts = []
+    monkeypatch.setattr(provision, "email_draft", lambda *a, **k: drafts.append(k))
+
+    assert provision.main(["new", "--dry-run", "--open-draft"]) == 0
+
+    assert client.writes == []
+    assert "[dry-run] would create Property Manager at Elm Court (texample@example.com)" in capsys.readouterr().out
+    # The draft step is told it is a rehearsal, so it can't sign in or write a draft.
+    assert drafts and drafts[0]["dry"] is True and drafts[0]["open_draft"] is True

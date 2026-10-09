@@ -1010,7 +1010,7 @@ def create_outlook_draft(to, cc, subject, body, attachments):
     return message.get("webLink"), warnings
 
 
-def email_draft(hire, display_name, upn, password, config=None, open_draft=False):
+def email_draft(hire, display_name, upn, password, config=None, open_draft=False, dry=False):
     """Print a ready-to-paste login-info email. Shown once, never saved.
 
     The wording lives in email_template.txt (git-ignored, so it can carry
@@ -1053,6 +1053,18 @@ def email_draft(hire, display_name, upn, password, config=None, open_draft=False
         print(f"Cc: {cc}")
     print(rendered.rstrip())
     print("--- end draft ---")
+
+    if dry:
+        # A rehearsal must not touch the clipboard or, with --open-draft,
+        # sign in and write a real draft — those are the writes it rehearses.
+        act("[dry-run] would copy the body, real password included, to the clipboard")
+        if open_draft:
+            act(
+                "[dry-run] would create the Outlook draft in your Drafts folder "
+                "(signing in as you, with config.yaml's email_attachments and "
+                "your captured signature)"
+            )
+        return
 
     # First template line is the subject — with or without a "Subject:"
     # label, which the example template carries for readability; the
@@ -1255,7 +1267,7 @@ def cmd_new(args):
     checklist(hire)
     email_draft(
         hire, f"{hire['first_name']} {hire['last_name']}", upn, password,
-        config=config, open_draft=args.open_draft,
+        config=config, open_draft=args.open_draft, dry=dry,
     )
     if issues:
         raise ProvisionError("completed with issues: " + "; ".join(issues))
@@ -1367,7 +1379,7 @@ def cmd_reuse(args):
     checklist(hire)
     email_draft(
         hire, f"{hire['first_name']} {hire['last_name']}", upn, password,
-        config=config, open_draft=args.open_draft,
+        config=config, open_draft=args.open_draft, dry=dry,
     )
     if issues:
         raise ProvisionError("completed with issues: " + "; ".join(issues))

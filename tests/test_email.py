@@ -192,3 +192,20 @@ def test_a_failed_upload_after_the_draft_exists_is_reported_as_incomplete(delega
     assert "outlook draft: could not attach b.pdf" in out
     assert "draft created but incomplete" in out
     assert "https://outlook.example/msg-1" in out
+
+
+# --- a dry run rehearses the draft too ---------------------------------------------
+
+def test_dry_run_touches_neither_the_clipboard_nor_outlook(draft_env, monkeypatch, capsys):
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("a dry run created a real Outlook draft")
+
+    monkeypatch.setattr(provision, "create_outlook_draft", must_not_run)
+
+    provision.email_draft(HIRE, "Taylor Example", "t@example.com", None, config={}, open_draft=True, dry=True)
+
+    out = capsys.readouterr().out
+    assert draft_env == []   # nothing copied
+    assert "(generated at the real run)" in out   # the printed rehearsal still shows the shape
+    assert "[dry-run] would copy the body" in out
+    assert "[dry-run] would create the Outlook draft" in out

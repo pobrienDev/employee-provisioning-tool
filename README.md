@@ -166,7 +166,9 @@ python provision.py new --dry-run               # rehearse any write command
 
 `new`, `reuse`, and `terminate` all take `--dry-run`: reads still hit the API
 so the output is realistic (real group names, real collision checks), but
-every write becomes a `[dry-run] would ...` line. Every action — real or
+every write becomes a `[dry-run] would ...` line — the clipboard copy and,
+with `--open-draft`, the Outlook draft included, so a rehearsal never signs
+you in or leaves a draft behind. Every action — real or
 dry-run — is appended to `logs/provision-<date>.log` with a timestamp;
 passwords and personal contact details never go in the log.
 
