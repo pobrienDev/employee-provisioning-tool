@@ -1,0 +1,6 @@
+# Test configuration only — the tool itself is run as a script, not installed.
+[tool.pytest.ini_options]
+# provision.py and graph_api.py live at the repo root; this puts them on
+# sys.path for a plain `pytest` (an IDE's runner, say), not just `python -m pytest`.
+pythonpath = ["."]
+testpaths = ["tests"]

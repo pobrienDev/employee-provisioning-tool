@@ -10,6 +10,7 @@ Commands:
   terminate <upn>       offboard: disable, revoke sessions, strip groups/licenses
   skus                  list license SKU IDs for config.yaml
   capture-signature     save your Outlook signature for --open-draft to append
+  sign-out              forget the cached delegated sign-in (refresh token)
 
 new, reuse, and terminate accept --dry-run: reads still hit the API so the
 output is realistic, but every write is replaced with a "[dry-run] would ..."
@@ -19,10 +20,12 @@ never passwords or personal contact details.
 
 import argparse
 import base64
+import getpass
 import html
 import io
 import json
 import os
+import platform
 import re
 import secrets
 import shutil
@@ -31,39 +34,65 @@ import subprocess
 import sys
 import tempfile
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
 
 from graph_api import (
+    ATTACHMENT_UPLOAD_LIMIT,
     AUTH_METHOD_PATHS,
+    PASSWORD_METHOD_TYPE,
     ConfigError,
     DelegatedGraphClient,
     GraphClient,
     GraphError,
+    forget_sign_in,
 )
 
 BASE_DIR = Path(__file__).parent
 LOG_DIR = BASE_DIR / "logs"
 SIGNATURE_DIR = BASE_DIR / "signature"
-USER_FIELDS = "id,displayName,userPrincipalName,accountEnabled,jobTitle,officeLocation"
+USER_FIELDS = (
+    "id,displayName,userPrincipalName,accountEnabled,jobTitle,"
+    "givenName,surname,officeLocation"
+)
+
+
+# Group IDs in config.yaml are Entra object IDs. Anything else (a name, a
+# truncated paste) would come back from Graph as a 400 rather than a 404.
+GUID_RE = re.compile(r"[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}")
 
 
 class ProvisionError(Exception):
     """A provisioning step can't proceed; the message says why."""
 
 
+def operator_tag():
+    """Who is running the tool, as OS user @ machine, for the audit log."""
+    try:
+        user = getpass.getuser()
+    except Exception:   # no login name available (odd service contexts)
+        user = "?"
+    return f"{user}@{platform.node() or '?'}"
+
+
+OPERATOR = operator_tag()
+
+
 def audit(message):
     """Append a timestamped line to today's audit log.
 
     Actions only — passwords and personal contact details never go in.
+    Each line is tagged with the operator (OS user and machine), so the
+    log says who ran what; it is still a local text file, so Entra's own
+    audit log remains the authoritative record of what the app changed.
     """
     LOG_DIR.mkdir(exist_ok=True)
     now = datetime.now()
     path = LOG_DIR / f"provision-{now:%Y-%m-%d}.log"
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(f"{now:%Y-%m-%d %H:%M:%S}  {message}\n")
+        handle.write(f"{now:%Y-%m-%d %H:%M:%S}  [{OPERATOR}]  {message}\n")
 
 
 def act(message):
@@ -72,12 +101,39 @@ def act(message):
     audit(message)
 
 
-def load_yaml(name, hint):
+class HireLoader(yaml.SafeLoader):
+    """SafeLoader minus the number types.
+
+    YAML 1.1, which PyYAML implements, turns an unquoted 050 into the
+    octal integer 40 and 1e3 into a float. Nothing in hire.yaml is a
+    number — a property number is a label — so numbers stay text here.
+    Booleans still resolve, because copy_rpm and the platforms map use
+    them; a name that YAML reads as a boolean ("No") is caught in
+    load_hire instead.
+    """
+
+
+HireLoader.yaml_implicit_resolvers = {
+    first: [
+        (tag, regexp) for tag, regexp in resolvers
+        if tag not in ("tag:yaml.org,2002:int", "tag:yaml.org,2002:float")
+    ]
+    for first, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+
+# hire.yaml fields that are always text, whatever YAML made of them.
+HIRE_TEXT_FIELDS = (
+    "first_name", "last_name", "title", "property_number", "property_name",
+    "reuse_upn", "login_info_email", "rpm_email",
+)
+
+
+def load_yaml(name, hint, loader=yaml.SafeLoader):
     path = BASE_DIR / name
     if not path.exists():
         raise ProvisionError(f"{name} not found — {hint}")
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        data = yaml.load(path.read_text(encoding="utf-8"), Loader=loader)
     except yaml.YAMLError as exc:
         raise ProvisionError(f"{name} is not valid YAML: {exc}") from exc
     if data is None:
@@ -95,14 +151,30 @@ def load_config():
 
 def load_hire():
     hire = load_yaml(
-        "hire.yaml", "create it with the fields from the hire form (see README)"
+        "hire.yaml", "create it with the fields from the hire form (see README)",
+        loader=HireLoader,
     )
-    missing = [field for field in ("first_name", "last_name") if not hire.get(field)]
+    cleaned = {}
+    for key, value in hire.items():
+        if key in HIRE_TEXT_FIELDS:
+            if isinstance(value, bool):
+                # YAML 1.1 reads an unquoted No, Yes, On or Off as a boolean —
+                # and "No" is a real surname.
+                raise ProvisionError(
+                    f"hire.yaml: {key} reads as a yes/no value — put it in quotes, "
+                    f'for example {key}: "{"Yes" if value else "No"}"'
+                )
+            if value is not None:
+                value = str(value)
+        # Stray whitespace from copy-paste would otherwise reach the account's
+        # attributes and defeat title matching.
+        cleaned[key] = value.strip() if isinstance(value, str) else value
+    # Checked after stripping, so a whitespace-only name can't slip through
+    # as "present" and become an empty givenName.
+    missing = [field for field in ("first_name", "last_name") if not cleaned.get(field)]
     if missing:
         raise ProvisionError(f"hire.yaml is missing {', '.join(missing)}")
-    # Stray whitespace from copy-paste would otherwise reach the account's
-    # attributes and defeat title matching.
-    return {k: v.strip() if isinstance(v, str) else v for k, v in hire.items()}
+    return cleaned
 
 
 def temp_password():
@@ -119,6 +191,9 @@ def temp_password():
 
 
 def print_user(user, last_sign_in=None):
+    """One account per line, plus who holds it: a role account displays as
+    "{title} at {property}", so the person's name lives in givenName and
+    surname and is what the reuse-or-new decision turns on."""
     name = user.get("displayName") or "(no name)"
     upn = user.get("userPrincipalName") or "?"
     status = "enabled" if user.get("accountEnabled") else "DISABLED"
@@ -126,8 +201,99 @@ def print_user(user, last_sign_in=None):
     if user.get("jobTitle"):
         line += f"  {user['jobTitle']}"
     print(line)
+    holder = " ".join(
+        part for part in (user.get("givenName"), user.get("surname")) if part
+    )
+    details = []
+    if holder:
+        details.append(f"held by: {holder}")
+    if user.get("officeLocation"):
+        details.append(f"office: {user['officeLocation']}")
+    if details:
+        print(f"{'':28}" + "  ·  ".join(details))
     if last_sign_in:
         print(f"{'':28}last sign-in: {last_sign_in}")
+
+
+def get_user_with_sign_in(client, upn, fields=USER_FIELDS):
+    """One user plus signInActivity when the tenant allows reading it
+    (AuditLog.Read.All and an Entra ID P1 license); the plain fields
+    otherwise. None when no such account exists."""
+    try:
+        return client.get_user(upn, fields + ",signInActivity")
+    except GraphError as exc:
+        if exc.status not in (400, 403):
+            raise
+        return client.get_user(upn, fields)
+
+
+SIGN_IN_KINDS = (
+    ("lastSuccessfulSignInDateTime", "successful"),
+    ("lastSignInDateTime", "interactive"),
+    ("lastNonInteractiveSignInDateTime", "non-interactive"),
+)
+
+
+def last_sign_in(user):
+    """The account's most recent sign-in from signInActivity, as text, or None.
+
+    lastSignInDateTime counts interactive sign-ins only. A role account
+    used every day through the Outlook mobile app refreshes its tokens
+    without one and would look abandoned — and the reuse-or-new decision
+    turns on this column — so the latest of the interactive,
+    non-interactive and last-successful stamps is shown, with its kind.
+    """
+    activity = user.get("signInActivity") or {}
+    stamps = [(activity[key], kind) for key, kind in SIGN_IN_KINDS if activity.get(key)]
+    if not stamps:
+        return None
+    when, kind = max(stamps)   # ISO-8601 UTC stamps order chronologically as text
+    return f"{when} ({kind})"
+
+
+def role_number(local, config):
+    """The property number of a role-format local part ("manager619" ->
+    "619"), or None when it doesn't start with a configured role prefix."""
+    roles = (config.get("naming") or {}).get("roles") or []
+    for role in roles:
+        rest = local[len(str(role)):]
+        if local.startswith(str(role)) and rest.isdigit():
+            return rest
+    return None
+
+
+def reuse_concerns(upn, user, hire, config):
+    """Reasons the reuse target looks like the wrong account.
+
+    reuse resets the password, revokes sessions, renames the account and
+    wipes its MFA methods — on an active employee's account that is a
+    lockout, so anything that doesn't look like a departed holder's role
+    account is called out: a UPN that isn't a configured role prefix, a
+    role account at a different property than hire.yaml names, or an
+    account that is still enabled.
+    """
+    concerns = []
+    local = upn.split("@", 1)[0]
+    roles = (config.get("naming") or {}).get("roles") or []
+    if roles:
+        number = role_number(local, config)
+        numbers = property_numbers(hire.get("property_number"))
+        if number is None:
+            concerns.append(
+                f"{local} is not a role account (naming.roles: {', '.join(map(str, roles))})"
+            )
+        elif numbers and number not in numbers:
+            concerns.append(
+                f"{local} belongs to property {number}, but hire.yaml says "
+                f"{property_label(hire.get('property_number'))}"
+            )
+    if user.get("accountEnabled"):
+        when = last_sign_in(user)
+        concerns.append(
+            "the account is enabled — someone may still be using it"
+            + (f" (last sign-in {when})" if when else "")
+        )
+    return concerns
 
 
 def tenant_domain(config, required=True):
@@ -137,8 +303,41 @@ def tenant_domain(config, required=True):
     return domain
 
 
+def announce_tenant(client, config):
+    """Say which tenant a write command is about to touch — the app's
+    tenant from .env and the domain from config.yaml — before anything
+    happens, so a swapped .env or a stale shell variable can't go unseen."""
+    tenant_id = getattr(client, "tenant_id", None) or "?"
+    domain = tenant_domain(config, required=False)
+    act(f"tenant: {tenant_id}" + (f" ({domain})" if domain else ""))
+
+
+# Letters that NFKD decomposition can't reduce to an ASCII base letter — they
+# have no decomposition, so without this table they would simply vanish
+# ("Øyvind Strauß" -> ystrau@, wrong initial and a cut-off surname).
+TRANSLITERATIONS = str.maketrans({
+    "ß": "ss", "ẞ": "SS",
+    "ø": "o", "Ø": "O",
+    "æ": "ae", "Æ": "AE",
+    "œ": "oe", "Œ": "OE",
+    "ł": "l", "Ł": "L",
+    "đ": "d", "Đ": "D",
+    "ð": "d", "Ð": "D",
+    "þ": "th", "Þ": "Th",
+    "ı": "i",
+    "ħ": "h", "Ħ": "H",
+    "ŧ": "t", "Ŧ": "T",
+})
+
+
 def sanitize_local(text):
-    """Reduce a name fragment to the ASCII letters/digits a UPN allows."""
+    """Reduce a name fragment to the ASCII letters/digits a UPN allows.
+
+    Accented letters lose their accents (NFKD, then drop the combining
+    marks); letters with no accent form to fall back to are transliterated
+    first. Anything else that isn't an ASCII letter or digit is dropped.
+    """
+    text = str(text).translate(TRANSLITERATIONS)
     ascii_text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
     return "".join(ch for ch in ascii_text if ch.isalnum()).lower()
 
@@ -237,12 +436,53 @@ def display_name_for(hire, config):
     return f"{hire['first_name']} {hire['last_name']}"
 
 
+RECENT_CREATE_WINDOW = timedelta(days=7)
+
+
+def recent_account_for(client, hire):
+    """An account created in the last week with the hire's exact name, or
+    None.
+
+    If a `new` run stopped after create_user succeeded, re-running it
+    would find the first UPN taken, step to the next rung of the ladder
+    and create a *second* account (and a second license seat) for the same
+    person. The way to finish a half-done hire is `reuse --upn` on the
+    account that already exists, so this check stops `new` and points
+    there.
+    """
+    try:
+        matches = client.find_users_by_name(
+            hire["first_name"], hire["last_name"],
+            "id,userPrincipalName,displayName,createdDateTime,accountEnabled",
+        )
+    except GraphError:
+        return None   # the name check is a safety net, not a gate
+    cutoff = datetime.now(timezone.utc) - RECENT_CREATE_WINDOW
+    for user in matches:
+        created = user.get("createdDateTime")
+        if not created:
+            continue
+        try:
+            when = datetime.fromisoformat(created.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if when >= cutoff:
+            return user
+    return None
+
+
 def pick_upn(client, hire, config):
     """Find the first available UPN for the hire's name.
 
     Tries first initial + last name, then two letters of the first name,
     three, and so on through the full first name; falls back to numbered
     variants if every letter-based one is taken.
+
+    "Taken" means an existing UPN, or an address some user or group
+    already receives mail at — a primary address, an alias in
+    proxyAddresses (the tool itself suggests personal aliases for role
+    accounts) or a mail nickname — since a UPN that collides with one of
+    those would be an account whose mail lands somewhere else.
     """
     domain = tenant_domain(config)
     first = sanitize_local(hire["first_name"])
@@ -256,13 +496,30 @@ def pick_upn(client, hire, config):
     stems = list(dict.fromkeys(stems))
     candidates = stems + [f"{stems[-1]}{n}" for n in range(2, 10)]
 
+    alias_check = True
     for local in candidates:
         upn = f"{local}@{domain}"
         existing = client.get_user(upn, "id,displayName")
-        if existing is None:
-            return upn
-        holder = existing.get("displayName") or "existing account"
-        print(f"  {upn} taken ({holder}) — trying next")
+        if existing is not None:
+            holder = existing.get("displayName") or "existing account"
+            print(f"  {upn} taken ({holder}) — trying next")
+            continue
+        if alias_check:
+            try:
+                holder = client.address_holder(local, domain)
+            except GraphError as exc:
+                # Still a usable answer: the UPN itself is free. But say so
+                # loudly, since an alias collision would now go unnoticed.
+                print(
+                    f"  warning: could not check whether {upn} is already an email "
+                    f"alias ({exc}) — verify in the admin center before relying on it"
+                )
+                alias_check = False
+                holder = None
+            if holder:
+                print(f"  {upn} taken as an email address ({holder}) — trying next")
+                continue
+        return upn
     raise ProvisionError("no available UPN found after trying every variant — pass --upn")
 
 
@@ -295,7 +552,7 @@ def groups_for(hire, config):
     return list(dict.fromkeys(selected))
 
 
-def choose_license(client, config, hire):
+def choose_license(client, config, hire, held=()):
     """Pick the license SKU for this hire from config.yaml's licensing rules.
 
     The `licensing` section holds ordered fallback chains — corporate
@@ -305,15 +562,23 @@ def choose_license(client, config, hire):
     wins; a chain with one entry means "this SKU or nothing". Without a
     `licensing` section, the flat `license_sku` keeps its old behavior.
 
+    `held` is the skuIds the account already carries (a reused role account
+    that was only disabled keeps its license). One of them in the hire's
+    chain means nothing to assign; one outside the chain is reported rather
+    than doubled, since a second SKU is a second paid seat.
+
     Returns (sku_id, label, notes, problem): sku_id is None when nothing
     should be assigned, notes are act()-ready lines explaining the choice,
     and problem is set when the outcome should count as an issue.
     """
+    held_ids = {str(sku).lower() for sku in held if sku}
     licensing = config.get("licensing")
     if not isinstance(licensing, dict):
         sku = config.get("license_sku")
         if not sku:
             return None, None, ["license skipped — no licensing rules in config.yaml"], None
+        if str(sku).lower() in held_ids:
+            return None, None, [f"license kept — the account already holds {sku}"], None
         return sku, str(sku), [], None
 
     title = (hire.get("title") or "").lower()
@@ -334,16 +599,42 @@ def choose_license(client, config, hire):
         if exc.status == 403:
             problem = (
                 "license not assigned — checking seat availability needs the "
-                "Organization.Read.All application permission (admin-consented)"
+                "LicenseAssignment.Read.All application permission (admin-consented)"
             )
-            return None, None, [], problem
-        raise
+        else:
+            problem = f"license not assigned — could not read the tenant's license SKUs: {exc}"
+        return None, None, [], problem
     by_key = {}
     for sku in skus:
         by_key[str(sku.get("skuId", "")).lower()] = sku
         by_key[str(sku.get("skuPartNumber", "")).lower()] = sku
 
+    def part_of(sku_id):
+        sku = by_key.get(str(sku_id).lower()) or {}
+        return sku.get("skuPartNumber") or str(sku_id)
+
     notes = []
+    if held_ids:
+        chain_ids = {
+            str(by_key[str(entry).lower()].get("skuId", "")).lower()
+            for entry in chain if str(entry).lower() in by_key
+        }
+        kept = sorted(part_of(sku_id) for sku_id in held_ids & chain_ids)
+        if kept:
+            notes.append(
+                f"license kept — the account already holds {', '.join(kept)} "
+                f"(in the licensing.{which} chain)"
+            )
+            return None, None, notes, None
+        holding = ", ".join(sorted(part_of(sku_id) for sku_id in held_ids))
+        problem = (
+            f"license not assigned — the account already holds {holding}, which "
+            f"isn't in the licensing.{which} chain "
+            f"({', '.join(str(entry) for entry in chain)}); swap it in the admin "
+            "center (or remove it and re-run) rather than paying for two seats"
+        )
+        return None, None, notes, problem
+
     for entry in chain:
         sku = by_key.get(str(entry).lower())
         if sku is None:
@@ -363,16 +654,19 @@ def choose_license(client, config, hire):
     return None, None, notes, problem
 
 
-def provision_extras(client, config, hire, user_id, dry, upn=None, join_dls=False):
+def provision_extras(client, config, hire, user_id, dry, upn=None, join_dls=False,
+                     held_licenses=()):
     """License and group membership, shared by new and reuse.
 
     Distribution lists print as manual steps unless join_dls asks for the
-    Exchange Online PowerShell path. Returns a list of issues rather than
-    raising, so one failure doesn't abandon the remaining steps.
+    Exchange Online PowerShell path. held_licenses is what the account
+    already carries, so reuse doesn't stack a second SKU on a role account
+    that kept its old one. Returns a list of issues rather than raising,
+    so one failure doesn't abandon the remaining steps.
     """
     issues = []
 
-    sku_id, label, notes, problem = choose_license(client, config, hire)
+    sku_id, label, notes, problem = choose_license(client, config, hire, held=held_licenses)
     for note in notes:
         act(note)
     if problem:
@@ -387,6 +681,8 @@ def provision_extras(client, config, hire, user_id, dry, upn=None, join_dls=Fals
             client.assign_license(user_id, sku_id)
             act(f"license assigned: {label}")
         except GraphError as exc:
+            # Graph reports an exhausted SKU under the generic
+            # Request_BadRequest code, so the message text is the only signal.
             if "available licenses" in str(exc):
                 msg = "license not assigned — the last free seat was taken mid-run"
             else:
@@ -401,9 +697,20 @@ def provision_extras(client, config, hire, user_id, dry, upn=None, join_dls=Fals
 
     pending_dls = []
     for group_id in group_ids:
-        group = client.get_group(
-            group_id, "displayName,groupTypes,mailEnabled,securityEnabled,mail"
-        )
+        if not GUID_RE.fullmatch(str(group_id)):
+            msg = f"group {group_id} is not a group ID (expected a GUID) — check config.yaml"
+            act(msg)
+            issues.append(msg)
+            continue
+        try:
+            group = client.get_group(
+                group_id, "displayName,groupTypes,mailEnabled,securityEnabled,mail"
+            )
+        except GraphError as exc:
+            msg = f"could not look up group {group_id}: {exc}"
+            act(msg)
+            issues.append(msg)
+            continue
         if group is None:
             msg = f"group {group_id} not found — check config.yaml"
             act(msg)
@@ -427,6 +734,8 @@ def provision_extras(client, config, hire, user_id, dry, upn=None, join_dls=Fals
             client.add_group_member(group_id, user_id)
             act(f"added to group: {label}")
         except GraphError as exc:
+            # "already a member" comes back as Request_BadRequest, the same
+            # code as a malformed request, so the message text has to do.
             if exc.status == 400 and "already exist" in str(exc):
                 act(f"already in group: {label}")
             else:
@@ -446,14 +755,38 @@ def provision_extras(client, config, hire, user_id, dry, upn=None, join_dls=Fals
                 try:
                     issues += join_distribution_lists(upn, pending_dls)
                 except ProvisionError as exc:
+                    # No PowerShell, or the session timed out: nothing was
+                    # joined, so the paste-ready commands are the fallback.
                     act(str(exc))
                     issues.append(str(exc))
+                    print_dl_joins(upn, pending_dls)
         else:
             # Paste-ready commands beat a per-run sign-in: connect once per
             # day, then each hire's joins are a two-second paste. (The
             # admin center's Assign memberships panel works too.)
             print_dl_joins(upn, pending_dls)
     return issues
+
+
+# The single-quote characters PowerShell accepts as string delimiters: the
+# ASCII apostrophe and the typographic ones (U+2018 to U+201B), which it
+# treats as ordinary quotes. Any of them inside a literal must be doubled.
+PS_QUOTES = ("'", "\u2018", "\u2019", "\u201a", "\u201b")
+
+
+def ps_quote(value):
+    """Return value as a single-quoted PowerShell string literal.
+
+    Every value the tool hands to Exchange Online PowerShell — SMTP
+    addresses, UPNs, a temp-file path — goes through here, so nothing can
+    close the literal early and run as code. Inside '...' the only special
+    characters are the quote delimiters themselves, and a doubled quote
+    stays literal; the same rule covers the typographic quotes.
+    """
+    text = str(value)
+    for quote_char in PS_QUOTES:
+        text = text.replace(quote_char, quote_char * 2)
+    return f"'{text}'"
 
 
 def print_dl_joins(upn, dls):
@@ -464,12 +797,11 @@ def print_dl_joins(upn, dls):
         "Exchange Online PowerShell window (Connect-ExchangeOnline once, then "
         "reuse the session)"
     )
-    member = (upn or "<upn>").replace("'", "''")
+    member = ps_quote(upn or "<upn>")
     for identity, label in dls:
-        quoted = str(identity).replace("'", "''")
         print(
-            f"    Add-DistributionGroupMember -Identity '{quoted}' "
-            f"-Member '{member}'  # {label}"
+            f"    Add-DistributionGroupMember -Identity {ps_quote(identity)} "
+            f"-Member {member}  # {label}"
         )
 
 
@@ -478,29 +810,47 @@ def reset_mfa(client, user_id, dry):
     Authenticator, security keys) so the next owner enrolls fresh.
 
     Used by reuse only: a terminated account is disabled outright, so its
-    registrations are left untouched. Returns a list of issues; a missing
-    permission degrades to a note.
+    registrations are left untouched. Returns a list of issues. Anything
+    that leaves a previous holder's method in place — a missing permission,
+    a method type this tool can't delete, a failed delete — is an issue,
+    because the new hire's MFA prompts would otherwise reach the old
+    holder's phone.
     """
     try:
         methods = client.list_auth_methods(user_id)
     except GraphError as exc:
         if exc.status == 403:
-            act(
-                "mfa reset skipped — needs the UserAuthenticationMethod."
-                "ReadWrite.All application permission (admin-consented)"
+            msg = (
+                "mfa not reset — needs the UserAuthenticationMethod.ReadWrite.All "
+                "application permission (admin-consented); remove the previous "
+                "holder's methods in the admin center (user → Authentication methods)"
             )
-            return []
-        raise
-
-    removable = [m for m in methods if m.get("@odata.type") in AUTH_METHOD_PATHS]
-    if not removable:
-        act("no registered mfa methods to remove")
-        return []
-    if dry:
-        act(f"[dry-run] would remove {len(removable)} registered mfa method(s)")
-        return []
+            act(msg)
+            return [msg]
+        msg = f"mfa not reset — could not read the account's authentication methods: {exc}"
+        act(msg)
+        return [msg]
 
     issues = []
+    removable = [m for m in methods if m.get("@odata.type") in AUTH_METHOD_PATHS]
+    for method in methods:
+        kind = method.get("@odata.type")
+        if kind in AUTH_METHOD_PATHS or kind == PASSWORD_METHOD_TYPE:
+            continue
+        label = (kind or "unknown").split(".")[-1].removesuffix("AuthenticationMethod")
+        msg = (
+            f"mfa method {label} left in place — this tool can't remove that "
+            "type; remove it in the admin center (user → Authentication methods)"
+        )
+        act(msg)
+        issues.append(msg)
+    if not removable:
+        act("no registered mfa methods to remove")
+        return issues
+    if dry:
+        act(f"[dry-run] would remove {len(removable)} registered mfa method(s)")
+        return issues
+
     for method in removable:
         path = AUTH_METHOD_PATHS[method["@odata.type"]]
         label = path.removesuffix("Methods")
@@ -514,6 +864,52 @@ def reset_mfa(client, user_id, dry):
     return issues
 
 
+def review_memberships(client, user_id, hire, config):
+    """List what a reused account still carries beyond the hire's groups.
+
+    reuse only ever adds memberships, so whatever the previous holder had —
+    groups tied to another title, anything added by hand for that person,
+    directory roles — would otherwise pass silently to the new hire. Every
+    group outside groups_for() is printed for review (kept, since some may
+    be intended), and an inherited directory role counts as an issue.
+    Returns the issues.
+    """
+    expected = set(groups_for(hire, config))
+    try:
+        groups = client.get_member_groups(user_id)
+        roles = client.get_member_roles(user_id)
+    except GraphError as exc:
+        msg = f"could not review the account's existing memberships — {exc}"
+        act(msg)
+        return [msg]
+
+    extras = [g for g in groups if g.get("id") not in expected]
+    if extras:
+        act(
+            f"review — {len(extras)} membership(s) kept from the previous holder "
+            "that config.yaml doesn't map to this title or property:"
+        )
+        for group in extras:
+            label = group.get("displayName") or group.get("id")
+            kind = group_kind(group)
+            how = {
+                "exchange": "distribution list — Remove-DistributionGroupMember in Exchange Online PowerShell",
+                "dynamic": "dynamic group — membership follows attributes",
+            }.get(kind, "remove in the admin center if the new hire shouldn't have it")
+            act(f"  still a member of {label} ({how})")
+    issues = []
+    for role in roles:
+        label = role.get("displayName") or role.get("id")
+        msg = (
+            f"directory role {label} inherited from the previous holder — remove it "
+            "in the Entra admin center (Roles and administrators) unless the new "
+            "hire needs it"
+        )
+        act(msg)
+        issues.append(msg)
+    return issues
+
+
 def role_alias_note(client, hire, config, upn):
     """Suggest a personal email alias for role-format accounts.
 
@@ -522,9 +918,7 @@ def role_alias_note(client, hire, config, upn):
     aliases (proxyAddresses is read-only), so the tool picks the first free
     personal address and prints it as a manual step.
     """
-    local = upn.split("@", 1)[0]
-    roles = (config.get("naming") or {}).get("roles") or []
-    if not any(local.startswith(role) and local[len(role):].isdigit() for role in roles):
+    if role_number(upn.split("@", 1)[0], config) is None:
         return
     try:
         alias = pick_upn(client, hire, config)
@@ -656,10 +1050,31 @@ def create_outlook_draft(to, cc, subject, body, attachments):
     so the draft shows up in Outlook's Drafts folder — new Outlook, web,
     and phone included — with the captured signature appended and the
     configured files attached. Nothing is sent: review and Send happen in
-    Outlook, and deleting the draft discards it. Returns (webLink, warnings).
+    Outlook, and deleting the draft discards it.
+
+    Returns (webLink, warnings). The files are checked before the draft is
+    created, so a bad path can't leave a half-built draft behind; once the
+    draft exists, anything that fails to attach becomes a warning rather
+    than an exception, since the draft is already there to be fixed up.
     """
     client = DelegatedGraphClient.from_env()
     signature, signature_files = load_signature()
+
+    files, warnings = [], []
+    for path in attachments or []:
+        file = Path(path)
+        if not file.exists():
+            warnings.append(f"attachment not found: {path}")
+            continue
+        size = file.stat().st_size
+        if size > ATTACHMENT_UPLOAD_LIMIT:
+            warnings.append(
+                f"attachment skipped — {size // (1024 * 1024)} MB is over Outlook's "
+                f"150 MB limit: {path}"
+            )
+            continue
+        files.append(file)
+
     content = "<html><body>" + draft_body_html(body)
     if signature:
         content += signature
@@ -677,39 +1092,43 @@ def create_outlook_draft(to, cc, subject, body, attachments):
         ]
     message = client.create_draft(payload)
 
-    warnings = []
-    for path in attachments or []:
-        file = Path(path)
-        if not file.exists():
-            warnings.append(f"attachment not found: {path}")
-            continue
-        client.add_attachment(message["id"], {
-            "@odata.type": "#microsoft.graph.fileAttachment",
-            "name": file.name,
-            "contentBytes": base64.b64encode(file.read_bytes()).decode("ascii"),
-        })
+    for file in files:
+        try:
+            client.add_file_attachment(message["id"], file.name, file.read_bytes())
+        except (OSError, GraphError) as exc:
+            warnings.append(f"could not attach {file.name}: {exc}")
     for item in signature_files:
         # Re-attach the signature's images exactly as Outlook stored them —
         # same contentId the HTML references — so the logo renders inline.
-        client.add_attachment(message["id"], {
-            "@odata.type": "#microsoft.graph.fileAttachment",
-            "name": item.get("name") or item["file"],
-            "contentBytes": base64.b64encode(item["path"].read_bytes()).decode("ascii"),
-            "contentType": item.get("contentType"),
-            "contentId": item.get("contentId"),
-            "isInline": bool(item.get("isInline", True)),
-        })
+        name = item.get("name") or item["file"]
+        try:
+            client.add_file_attachment(
+                message["id"], name, item["path"].read_bytes(),
+                content_type=item.get("contentType"),
+                content_id=item.get("contentId"),
+                is_inline=bool(item.get("isInline", True)),
+            )
+        except (OSError, GraphError) as exc:
+            warnings.append(f"could not attach signature image {name}: {exc}")
     return message.get("webLink"), warnings
 
 
-def email_draft(hire, display_name, upn, password, config=None, open_draft=False):
-    """Print a ready-to-paste login-info email. Shown once, never saved.
+def email_draft(hire, display_name, upn, password, config=None, open_draft=False, dry=False):
+    """Print the login-info email and put its body on the clipboard.
 
     The wording lives in email_template.txt (git-ignored, so it can carry
     company-specific text), falling back to the committed
     email_template.example.txt. Placeholders: {name}, {first}, {last},
-    {username}, {password}. With open_draft, a pre-filled Outlook compose
-    window (plus config.yaml's email_attachments) opens for a manual send.
+    {username}, {password}; the first line is the subject (an optional
+    "Subject:" label is stripped).
+
+    The password is printed once and this tool writes it to no file of its
+    own — but it travels with the draft. The body goes to the clipboard as
+    rich text, and with open_draft the whole email (recipients, subject,
+    body, config.yaml's email_attachments, the captured signature) is saved
+    through Graph into the operator's own Outlook Drafts folder — no compose
+    window opens — where it holds the password until it is sent or deleted.
+    A dry run prints the draft with a placeholder password and does neither.
     """
     to = hire.get("login_info_email")
     if not to:
@@ -739,19 +1158,37 @@ def email_draft(hire, display_name, upn, password, config=None, open_draft=False
             "{name}, {first}, {last}, {username}, {password}"
         ) from exc
 
-    print("\n--- login-info email draft (copy into your mail client; not sent, not saved) ---")
+    print("\n--- login-info email draft (not sent — you review and send it) ---")
     print(f"To: {to}")
     if cc:
         print(f"Cc: {cc}")
     print(rendered.rstrip())
     print("--- end draft ---")
 
-    # First template line is the subject; the clipboard gets just the body.
+    if dry:
+        # A rehearsal must not touch the clipboard or, with --open-draft,
+        # sign in and write a real draft — those are the writes it rehearses.
+        act("[dry-run] would copy the body, real password included, to the clipboard")
+        if open_draft:
+            act(
+                "[dry-run] would create the Outlook draft in your Drafts folder "
+                "(signing in as you, with config.yaml's email_attachments and "
+                "your captured signature)"
+            )
+        return
+
+    # First template line is the subject — with or without a "Subject:"
+    # label, which the example template carries for readability; the
+    # clipboard gets just the body.
     parts = rendered.rstrip().split("\n", 1)
-    subject = parts[0].strip()
+    subject = re.sub(r"^subject:\s*", "", parts[0].strip(), flags=re.IGNORECASE)
     body = parts[1].lstrip("\n") if len(parts) > 1 else parts[0]
     if copy_draft_to_clipboard(body):
-        print("  (body copied to the clipboard as rich text — paste into Outlook and the link stays clickable)")
+        print(
+            "  (body — temporary password included — copied to the clipboard as rich "
+            "text; paste into Outlook and the link stays clickable. Clipboard history "
+            "or a synced clipboard keeps that copy until it is cleared or overwritten.)"
+        )
     else:
         print("  (clipboard copy unavailable — after pasting in Outlook, click at the end of the link and press Enter to make it clickable)")
     audit(f"login-info email drafted for {upn}" + (" (cc RPM)" if cc else ""))
@@ -766,7 +1203,16 @@ def email_draft(hire, display_name, upn, password, config=None, open_draft=False
         else:
             for warning in warnings:
                 act(f"outlook draft: {warning}")
-            act("draft created in your Outlook Drafts folder — review it and click Send yourself")
+            if warnings:
+                act(
+                    "draft created but incomplete — it is in your Outlook Drafts folder "
+                    "without the item(s) above; add them there before sending"
+                )
+            else:
+                act(
+                    "draft created in your Outlook Drafts folder — it holds the temporary "
+                    "password until you send or delete it; review it and click Send yourself"
+                )
             if web_link:
                 print(f"  open it directly: {web_link}")
             if password is None:
@@ -817,8 +1263,7 @@ def cmd_discover(args):
             matches = client.find_users(prefix, USER_FIELDS)
         for user in matches:
             found = True
-            last = (user.get("signInActivity") or {}).get("lastSignInDateTime")
-            print_user(user, last)
+            print_user(user, last_sign_in(user))
 
     if not found:
         print(f"No accounts found for: {', '.join(prefixes)}")
@@ -834,7 +1279,7 @@ def cmd_skus(args):
     except GraphError as exc:
         if exc.status == 403:
             raise ProvisionError(
-                "listing licenses needs the Organization.Read.All application "
+                "listing licenses needs the LicenseAssignment.Read.All application "
                 "permission (admin-consented)"
             ) from exc
         raise
@@ -854,6 +1299,7 @@ def cmd_new(args):
     hire = enrich_from_property(load_hire(), config)
     client = GraphClient.from_env()
     dry = args.dry_run
+    announce_tenant(client, config)
     if args.upn:
         # An explicit UPN is a decision, not a starting point — never
         # silently substitute a different one for it.
@@ -865,6 +1311,20 @@ def cmd_new(args):
             print_user(existing)
             raise ProvisionError("that UPN is taken — pick another with --upn")
     else:
+        existing = recent_account_for(client, hire)
+        if existing:
+            when = (existing.get("createdDateTime") or "").replace("T", " ")[:16]
+            local = (existing.get("userPrincipalName") or "").split("@", 1)[0]
+            raise ProvisionError(
+                f"an account for {hire['first_name']} {hire['last_name']} already "
+                f"exists, created {when} UTC: {existing.get('userPrincipalName')}. "
+                "If hire.yaml still holds the last hire you processed, update it "
+                "for the next one. If an earlier run of new was interrupted before "
+                "it finished, complete it with: python provision.py reuse --upn "
+                f"{local} --yes --force (same name, so the rename is a no-op). If "
+                "this is a different person with the same name, pass --upn to "
+                "create another account."
+            )
         upn = pick_upn(client, hire, config)
     audit(f"new: {upn}{' (dry-run)' if dry else ''}")
 
@@ -898,13 +1358,16 @@ def cmd_new(args):
         try:
             created = client.create_user(payload)
         except GraphError as exc:
+            # A duplicate UPN is reported as Request_BadRequest, no more
+            # specific code, so the message text is matched here.
             if exc.status == 400 and "userPrincipalName already exists" in str(exc):
                 # The pre-check can miss an account created seconds ago — the
                 # directory lags a little before new UPNs are readable.
                 raise ProvisionError(
-                    f"{upn} already exists — if it was just created, the directory "
-                    "can lag a few seconds; re-run to see it, or pick another UPN "
-                    "with --upn"
+                    f"{upn} already exists — if an earlier run just created it, "
+                    "finish that account with: python provision.py reuse --upn "
+                    f"{upn.split('@', 1)[0]} --yes --force; otherwise pick another "
+                    "UPN with --upn"
                 ) from exc
             raise
         act(f"created {display_name} ({created.get('userPrincipalName', upn)})")
@@ -918,7 +1381,7 @@ def cmd_new(args):
     checklist(hire)
     email_draft(
         hire, f"{hire['first_name']} {hire['last_name']}", upn, password,
-        config=config, open_draft=args.open_draft,
+        config=config, open_draft=args.open_draft, dry=dry,
     )
     if issues:
         raise ProvisionError("completed with issues: " + "; ".join(issues))
@@ -929,6 +1392,7 @@ def cmd_reuse(args):
     hire = enrich_from_property(load_hire(), config)
     client = GraphClient.from_env()
     dry = args.dry_run
+    announce_tenant(client, config)
 
     target = args.upn or hire.get("reuse_upn")
     if not target:
@@ -939,19 +1403,34 @@ def cmd_reuse(args):
     upn = target if "@" in target or not domain else f"{target}@{domain}"
     audit(f"reuse: {upn}{' (dry-run)' if dry else ''}")
 
-    user = client.get_user(upn, USER_FIELDS)
+    user = get_user_with_sign_in(client, upn, USER_FIELDS + ",assignedLicenses")
     if not user:
         raise ProvisionError(f"{upn} not found — run discover first to see what exists")
-
-    old_status = "enabled" if user.get("accountEnabled") else "disabled"
-    print(f"Reusing {upn} (was: {user.get('displayName')}, {old_status})")
+    held_licenses = [lic.get("skuId") for lic in user.get("assignedLicenses") or []]
 
     display_name = display_name_for(hire, config)
+    print(f"Reusing {upn}:")
+    print_user(user, last_sign_in(user))
+    print(
+        "  plan: reset the password, revoke sessions, wipe registered MFA methods, "
+        f"rename to {display_name}, enable the account, then license and groups"
+    )
+    concerns = reuse_concerns(upn, user, hire, config)
+    for concern in concerns:
+        print(f"  warning: {concern}")
+    if not dry:
+        if not args.yes:
+            print("  nothing done — re-run with --yes to hand this account over")
+            audit("reuse: preview only, nothing changed")
+            return
+        if concerns and not args.force:
+            raise ProvisionError(
+                "refusing to reuse this account — " + "; ".join(concerns)
+                + ". Re-run with --force if this is really the account to hand over."
+            )
+
     if dry:
-        act(
-            f"[dry-run] would reset the password, revoke sessions, rename to "
-            f"{display_name}, and enable the account"
-        )
+        act("[dry-run] would reset the password and revoke sessions")
         password = None
     else:
         # Lock the departed employee out first: new password, then kill
@@ -967,41 +1446,64 @@ def cmd_reuse(args):
         except GraphError as exc:
             if exc.status == 403:
                 raise ProvisionError(
-                    "password reset was denied — app-only password changes need the "
-                    "User-PasswordProfile.ReadWrite.All application permission "
-                    "(admin-consented); User.ReadWrite.All alone doesn't cover them. "
-                    "Nothing was changed."
+                    "password reset was denied — app-only password changes need "
+                    "both the User-PasswordProfile.ReadWrite.All application "
+                    "permission (admin-consented) and the User Administrator "
+                    "directory role assigned to the app; User.ReadWrite.All alone "
+                    "doesn't cover them. If the app has both, the target holds an "
+                    "admin role that User Administrator can't reset. Nothing was "
+                    "changed."
                 ) from exc
             raise
-        client.revoke_sessions(user["id"])
-
-        changes = {
-            "accountEnabled": True,
-            "displayName": display_name,
-            "givenName": hire["first_name"],
-            "surname": hire["last_name"],
-            # assignLicense requires a usageLocation; older role accounts may lack one
-            "usageLocation": (config.get("tenant") or {}).get("usage_location", "US"),
-        }
-        if hire.get("title"):
-            changes["jobTitle"] = hire["title"]
-        if property_numbers(hire.get("property_number")):
-            changes["department"] = property_label(hire["property_number"])
-        client.update_user(user["id"], changes)
-
-        act(f"now: {display_name} — password reset, sessions revoked, account enabled")
+        # Each write is logged — and the password shown — the moment it
+        # lands, so a failure one step later can't leave a reset password
+        # that nobody saw and no log line admits to.
+        act("password reset to a temporary must-change password")
         print(f"  temp password: {password}  (must change at first sign-in)")
+        client.revoke_sessions(user["id"])
+        act("sessions revoked")
+
+    # Wipe the previous holder's MFA registrations while the account is
+    # still locked out — once it is enabled, any method still registered
+    # would answer the new hire's MFA prompts on the old holder's phone.
+    issues = reset_mfa(client, user["id"], dry)
+
+    changes = {
+        "accountEnabled": True,
+        "displayName": display_name,
+        "givenName": hire["first_name"],
+        "surname": hire["last_name"],
+        # assignLicense requires a usageLocation; older role accounts may lack one
+        "usageLocation": (config.get("tenant") or {}).get("usage_location", "US"),
+    }
+    if hire.get("title"):
+        changes["jobTitle"] = hire["title"]
+    if hire.get("property_name"):
+        # Same stamp as new: a reused account may be moving to a renamed
+        # or joined property, so its old Office value must not linger.
+        changes["officeLocation"] = hire["property_name"]
+    if property_numbers(hire.get("property_number")):
+        changes["department"] = property_label(hire["property_number"])
+    if dry:
+        act(
+            f"[dry-run] would rename to {display_name}, stamp title, office and "
+            "department, and enable the account"
+        )
+    else:
+        client.update_user(user["id"], changes)
+        act(f"now: {display_name} — renamed and enabled")
         print("  mailbox history stays with the role account.")
 
-    issues = reset_mfa(client, user["id"], dry)
     issues += provision_extras(
-        client, config, hire, user["id"], dry, upn=upn, join_dls=args.join_dls
+        client, config, hire, user["id"], dry, upn=upn, join_dls=args.join_dls,
+        held_licenses=held_licenses,
     )
+    issues += review_memberships(client, user["id"], hire, config)
     role_alias_note(client, hire, config, upn)
     checklist(hire)
     email_draft(
         hire, f"{hire['first_name']} {hire['last_name']}", upn, password,
-        config=config, open_draft=args.open_draft,
+        config=config, open_draft=args.open_draft, dry=dry,
     )
     if issues:
         raise ProvisionError("completed with issues: " + "; ".join(issues))
@@ -1012,9 +1514,10 @@ def exchange_shell(body):
 
     Membership of classic distribution lists and mailbox type are Exchange
     settings the Graph API can't write, so those steps shell out to the
-    ExchangeOnlineManagement module — the only place the tool acts as the
-    signed-in operator rather than the app registration, and always behind
-    an opt-in flag. The operator needs an Exchange admin (or recipient
+    ExchangeOnlineManagement module — one of the two ways the tool acts as
+    the signed-in operator rather than the app registration (the other is
+    DelegatedGraphClient, for the mailbox features), and always behind an
+    opt-in flag. The operator needs an Exchange admin (or recipient
     management) role.
 
     Sign-in depends on which PowerShell is installed. PowerShell 7 gets the
@@ -1073,10 +1576,10 @@ def convert_mailbox_shared(upn):
     mailbox and mail sent on its behalf land in its own Sent Items — so
     whoever inherits the shared mailbox keeps a complete record.
     """
-    quoted = upn.replace("'", "''")
+    quoted = ps_quote(upn)
     result = exchange_shell(
-        f"Set-Mailbox -Identity '{quoted}' -Type Shared -ErrorAction Stop; "
-        f"Set-Mailbox -Identity '{quoted}' -MessageCopyForSentAsEnabled $true "
+        f"Set-Mailbox -Identity {quoted} -Type Shared -ErrorAction Stop; "
+        f"Set-Mailbox -Identity {quoted} -MessageCopyForSentAsEnabled $true "
         "-MessageCopyForSendOnBehalfEnabled $true -ErrorAction Stop"
     )
     if result.returncode != 0:
@@ -1098,25 +1601,26 @@ def join_distribution_lists(upn, dls):
     output is left visible for the sign-in. Returns a list of issues; each
     outcome is reported through act().
     """
-    quoted_upn = upn.replace("'", "''")
+    quoted_upn = ps_quote(upn)
     handle, results_path = tempfile.mkstemp(prefix="provision-dls-", suffix=".txt")
     os.close(handle)
-    quoted_path = results_path.replace("'", "''")
+    quoted_path = ps_quote(results_path)
 
     def clause(gid):
-        # Every value lands inside a single-quoted PowerShell string, where
-        # the only special character is the apostrophe — legal in an SMTP
-        # address (o'brien-team@...), and doubled to stay literal. PowerShell
+        # Every value lands inside a single-quoted PowerShell string (see
+        # ps_quote): an apostrophe is legal in an SMTP address
+        # (o'brien-team@...) and is doubled to stay literal. PowerShell
         # un-doubles it when writing the results file, so the markers read
         # back below still carry the address exactly as configured.
-        quoted_gid = str(gid).replace("'", "''")
         return (
-            f"try {{ Add-DistributionGroupMember -Identity '{quoted_gid}' "
-            f"-Member '{quoted_upn}' -ErrorAction Stop; "
-            f"Add-Content -Path '{quoted_path}' -Value 'JOINED {quoted_gid}' }} "
+            f"try {{ Add-DistributionGroupMember -Identity {ps_quote(gid)} "
+            f"-Member {quoted_upn} -ErrorAction Stop; "
+            f"Add-Content -Path {quoted_path} -Value {ps_quote(f'JOINED {gid}')} }} "
+            # Exchange gives no error code here; its English message text
+            # is the only way to tell "already a member" from a failure.
             f"catch {{ if (\"$_\" -match 'already a member') "
-            f"{{ Add-Content -Path '{quoted_path}' -Value 'JOINED {quoted_gid}' }} else "
-            f"{{ Add-Content -Path '{quoted_path}' -Value ('FAILED {quoted_gid} ' + $_) }} }}"
+            f"{{ Add-Content -Path {quoted_path} -Value {ps_quote(f'JOINED {gid}')} }} else "
+            f"{{ Add-Content -Path {quoted_path} -Value ({ps_quote(f'FAILED {gid} ')} + $_) }} }}"
         )
 
     body = "; ".join(clause(gid) for gid, _ in dls)
@@ -1240,6 +1744,42 @@ def cmd_capture_signature(args):
     print("  back to the sign-off line so the draft doesn't carry it twice.")
 
 
+def cmd_sign_out(args):
+    """Delete the cached delegated sign-in so the next --open-draft or
+    capture-signature prompts for a fresh device-code sign-in."""
+    removed = forget_sign_in()
+    if removed:
+        act("cached delegated sign-in deleted — the next mailbox step will prompt again")
+        for path in removed:
+            print(f"    removed {path}")
+    else:
+        print("no cached delegated sign-in found")
+
+
+def split_licenses(user):
+    """(directly assigned skuIds, group-inherited skuIds) for an account.
+
+    assignedLicenses lists inherited (group-based) licenses alongside direct
+    ones without saying which is which, and an inherited license can't be
+    removed from the user — the whole assignLicense call fails. The
+    licenseAssignmentStates property tells them apart: assignedByGroup is
+    null for a direct assignment. Without that property every license
+    counts as direct.
+    """
+    assigned = [lic["skuId"] for lic in user.get("assignedLicenses") or []]
+    states = user.get("licenseAssignmentStates")
+    if states is None:
+        return assigned, []
+    direct = {
+        state.get("skuId") for state in states
+        if state.get("skuId") and not state.get("assignedByGroup")
+    }
+    return (
+        [sku for sku in assigned if sku in direct],
+        [sku for sku in assigned if sku not in direct],
+    )
+
+
 def group_kind(group):
     """How a membership can be ended: "graph" (normal group, removable via
     Graph), "exchange" (distribution list or mail-enabled security group —
@@ -1257,11 +1797,12 @@ def cmd_terminate(args):
     config = load_config()
     client = GraphClient.from_env()
     dry = args.dry_run
+    announce_tenant(client, config)
     domain = tenant_domain(config, required=False)
     upn = args.upn if "@" in args.upn or not domain else f"{args.upn}@{domain}"
     audit(f"terminate: {upn}{' (dry-run)' if dry else ''}")
 
-    user = client.get_user(upn, USER_FIELDS + ",assignedLicenses")
+    user = client.get_user(upn, USER_FIELDS + ",assignedLicenses,licenseAssignmentStates")
     if not user:
         raise ProvisionError(
             f"{upn} not found — note that accounts created moments ago can "
@@ -1269,7 +1810,8 @@ def cmd_terminate(args):
         )
 
     groups = client.get_member_groups(user["id"])
-    licenses = [lic["skuId"] for lic in user.get("assignedLicenses") or []]
+    roles = client.get_member_roles(user["id"])
+    licenses, inherited = split_licenses(user)
     # A shared mailbox usually exists so that mail keeps arriving — its
     # group and distribution-list memberships stay put.
     keep_groups = args.convert_shared
@@ -1280,7 +1822,17 @@ def cmd_terminate(args):
     def label(group):
         return group.get("displayName") or group["id"]
 
+    def inherited_note():
+        if inherited:
+            act(
+                f"{len(inherited)} group-assigned license(s) not removed directly — "
+                "they follow the group membership(s) that grant them"
+            )
+
     def exchange_notes():
+        """Memberships the tool can't end itself. Returns the follow-ups
+        still open afterwards, so the run can exit 1 until they're done."""
+        open_items = []
         for group in dynamic:
             act(f"{label(group)} is a dynamic group — membership follows attributes, nothing to remove")
         if exchange:
@@ -1288,13 +1840,29 @@ def cmd_terminate(args):
                 f"{len(exchange)} distribution list removal(s) printed below — paste "
                 "into an Exchange Online PowerShell window (Connect-ExchangeOnline once)"
             )
-            member = upn.replace("'", "''")
+            member = ps_quote(upn)
             for group in exchange:
-                identity = str(group.get("mail") or group["id"]).replace("'", "''")
+                identity = ps_quote(group.get("mail") or group["id"])
                 print(
-                    f"    Remove-DistributionGroupMember -Identity '{identity}' "
-                    f"-Member '{member}' -Confirm:$false  # {label(group)}"
+                    f"    Remove-DistributionGroupMember -Identity {identity} "
+                    f"-Member {member} -Confirm:$false  # {label(group)}"
                 )
+            open_items.append(
+                f"{len(exchange)} distribution list removal(s) still to paste into "
+                "Exchange Online PowerShell"
+            )
+        for role in roles:
+            # Roles outlive a disable: a re-enabled or reused account would
+            # hold them again. Removing them needs a permission the app
+            # deliberately lacks, so they are handed to the admin center.
+            msg = (
+                f"directory role {label(role)} stays assigned — remove it in the "
+                "Entra admin center (Roles and administrators); this tool holds "
+                "no role-management permission"
+            )
+            act(msg)
+            open_items.append(msg)
+        return open_items
 
     print("Terminating:")
     print_user(user)
@@ -1314,6 +1882,7 @@ def cmd_terminate(args):
             act(f"[dry-run] would remove {len(licenses)} license(s)")
         else:
             act("no licenses to remove")
+        inherited_note()
         if not args.convert_shared:
             print("  manual step if mail must be retained: convert the mailbox to shared (Exchange admin center)")
         return
@@ -1324,18 +1893,27 @@ def cmd_terminate(args):
         group_plan = f"remove {len(removable)} group membership(s)"
         if exchange:
             group_plan += f" (+{len(exchange)} distribution list(s) as paste-ready commands)"
+    if roles:
+        group_plan += f", {len(roles)} directory role(s) to remove by hand"
     print(
         f"  plan: disable account, revoke sessions,"
         f"{' convert the mailbox to shared,' if args.convert_shared else ''} "
         f"{group_plan}, remove {len(licenses)} license(s)"
+        + (f" ({len(inherited)} group-assigned follow the memberships)" if inherited else "")
     )
     if not args.yes:
-        raise ProvisionError("nothing done — re-run with --yes to offboard this account")
+        # The documented preview path, not a failure: exit 0 and no error
+        # line in the log, so a script or a reader can tell the two apart.
+        print("  nothing done — re-run with --yes to offboard this account")
+        audit("terminate: preview only, nothing changed")
+        return
 
-    # Lock out first, then clean up.
+    # Lock out first, then clean up — logging each write as it lands, so a
+    # failed revocation can't hide the disable that already happened.
     client.update_user(user["id"], {"accountEnabled": False})
+    act("account disabled")
     client.revoke_sessions(user["id"])
-    act("account disabled, sessions revoked")
+    act("sessions revoked")
 
     issues = []
     converted = not args.convert_shared  # nothing to wait on when not asked for
@@ -1359,19 +1937,25 @@ def cmd_terminate(args):
             msg = f"could not remove from {label(group)}: {exc}"
             act(msg)
             issues.append(msg)
-    exchange_notes()
+    issues += exchange_notes()
 
     if not licenses:
         act("no licenses to remove")
     elif converted:
-        client.remove_licenses(user["id"], licenses)
-        act(f"removed {len(licenses)} license(s)")
+        try:
+            client.remove_licenses(user["id"], licenses)
+            act(f"removed {len(licenses)} license(s)")
+        except GraphError as exc:
+            msg = f"could not remove the license(s): {exc}"
+            act(msg)
+            issues.append(msg)
     else:
         # Pulling the license off an unconverted mailbox starts its deletion
         # clock — keep it until the conversion has actually happened.
         msg = "licenses kept — convert the mailbox first, then remove them"
         act(msg)
         issues.append(msg)
+    inherited_note()
 
     if not args.convert_shared:
         print("  manual step if mail must be retained: convert the mailbox to shared (Exchange admin center)")
@@ -1427,6 +2011,16 @@ def main(argv=None):
     )
     reuse.add_argument("--upn", help="role account to reuse (defaults to reuse_upn in hire.yaml)")
     reuse.add_argument(
+        "--yes", action="store_true",
+        help="actually hand the account over; without it the command only "
+             "shows the account and the plan",
+    )
+    reuse.add_argument(
+        "--force", action="store_true",
+        help="proceed even when the account is enabled, or its UPN isn't a "
+             "configured role account for the hire's property",
+    )
+    reuse.add_argument(
         "--dry-run", action="store_true",
         help="print what would happen without changing anything",
     )
@@ -1456,6 +2050,13 @@ def main(argv=None):
              "'signature-capture') for --open-draft to append; signs in as you",
     )
     capture.set_defaults(func=cmd_capture_signature)
+
+    sign_out = subparsers.add_parser(
+        "sign-out",
+        help="delete the cached delegated sign-in (refresh token) so "
+             "--open-draft and capture-signature prompt again",
+    )
+    sign_out.set_defaults(func=cmd_sign_out)
 
     terminate = subparsers.add_parser(
         "terminate", help="offboard an account: disable, revoke sessions, strip groups and licenses"

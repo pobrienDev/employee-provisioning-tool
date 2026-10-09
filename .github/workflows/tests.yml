@@ -4,13 +4,27 @@ on:
   push:
   pull_request:
 
+# The job only reads the checkout; the default GITHUB_TOKEN scope is wider.
+permissions:
+  contents: read
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Ubuntu for the common case; Windows because the PowerShell,
+        # console-window and clipboard paths are written for it.
+        os: [ubuntu-latest, windows-latest]
+        # The oldest Python the pinned dependencies allow, and the one
+        # the README names as tested.
+        python-version: ["3.10", "3.12"]
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      # Actions pinned to commit SHAs: a moved tag can't change what runs here.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - run: python -m pip install -r requirements-dev.txt
       - run: python -m pytest -q

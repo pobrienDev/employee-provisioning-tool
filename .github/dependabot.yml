@@ -1,0 +1,12 @@
+# Dependency upgrades arrive as pull requests, so each one is reviewed
+# (and run through the test suite) before it can reach the tool.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

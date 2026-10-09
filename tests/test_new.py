@@ -1,0 +1,223 @@
+"""Tests for account creation (provision.cmd_new).
+
+No network: FakeGraph answers the UPN ladder and the same-name check from
+dictionaries and records every write, so a test can assert both what a
+`new` run creates and what it refuses to create.
+
+Run from the repo root:  python -m pytest -q
+"""
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+import provision
+from graph_api import GraphError
+
+DOMAIN = "example.com"
+HIRE = {
+    "first_name": "Taylor",
+    "last_name": "Example",
+    "title": "Property Manager",
+    "property_number": "619",
+    "property_name": "Elm Court",
+}
+CONFIG = {"tenant": {"domain": DOMAIN, "usage_location": "US"}}
+
+
+class FakeGraph:
+    """get_user answers from `existing` (UPN -> display name); find_users_by_name
+    from `same_name`; create_user records the payload and returns an id."""
+
+    WRITES = {"create_user", "update_user", "assign_license", "add_group_member"}
+
+    def __init__(self, existing=None, same_name=(), create_error=None):
+        self.existing = dict(existing or {})
+        self.same_name = list(same_name)
+        self.create_error = create_error
+        self.calls = []
+
+    @property
+    def writes(self):
+        return [call for call in self.calls if call[0] in self.WRITES]
+
+    def get_user(self, upn, select):
+        self.calls.append(("get_user", upn))
+        if upn in self.existing:
+            return {"id": "other", "displayName": self.existing[upn], "userPrincipalName": upn}
+        return None
+
+    def find_users_by_name(self, given_name, surname, select):
+        self.calls.append(("find_users_by_name", given_name, surname))
+        return list(self.same_name)
+
+    def address_holder(self, local, domain):
+        self.calls.append(("address_holder", f"{local}@{domain}"))
+        return None
+
+    def create_user(self, payload):
+        self.calls.append(("create_user", payload))
+        if self.create_error:
+            raise self.create_error
+        return {"id": "new-1", "userPrincipalName": payload["userPrincipalName"]}
+
+    def list_skus(self):
+        return []
+
+    def get_member_groups(self, user_id):
+        return []
+
+    def get_member_roles(self, user_id):
+        return []
+
+
+@pytest.fixture
+def wire(monkeypatch, tmp_path):
+    monkeypatch.setattr(provision, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(provision, "load_config", lambda: dict(CONFIG))
+    monkeypatch.setattr(provision, "load_hire", lambda: dict(HIRE))
+    monkeypatch.setattr(provision, "temp_password", lambda: "Temp-Pass-1!")
+
+    def install(client):
+        monkeypatch.setattr(provision.GraphClient, "from_env", classmethod(lambda cls: client))
+        return client
+
+    return install
+
+
+def hours_ago(hours):
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# --- a half-finished run must not become a second account ----------------------
+
+def test_a_recent_account_with_the_same_name_stops_new(wire, capsys):
+    leftover = {
+        "id": "u-left", "userPrincipalName": f"texample@{DOMAIN}",
+        "displayName": "Property Manager at Elm Court", "createdDateTime": hours_ago(2),
+    }
+    client = wire(FakeGraph(existing={f"texample@{DOMAIN}": "Property Manager at Elm Court"}, same_name=[leftover]))
+
+    assert provision.main(["new"]) == 1
+
+    assert client.writes == []
+    err = capsys.readouterr().err
+    assert "an account for Taylor Example already exists" in err
+    # The usual way to hit this is a hire.yaml left over from the last hire.
+    assert "If hire.yaml still holds the last hire you processed" in err
+    assert "reuse --upn texample --yes --force" in err
+
+
+def test_an_old_namesake_does_not_stop_new(wire):
+    namesake = {"id": "u-old", "userPrincipalName": f"texample@{DOMAIN}", "createdDateTime": hours_ago(24 * 30)}
+    client = wire(FakeGraph(existing={f"texample@{DOMAIN}": "Taylor Example"}, same_name=[namesake]))
+
+    assert provision.main(["new"]) == 0
+
+    created = [call for call in client.writes if call[0] == "create_user"]
+    assert created and created[0][1]["userPrincipalName"] == f"taexample@{DOMAIN}"
+
+
+def test_an_explicit_upn_skips_the_name_check(wire):
+    leftover = {"id": "u-left", "userPrincipalName": f"texample@{DOMAIN}", "createdDateTime": hours_ago(1)}
+    client = wire(FakeGraph(same_name=[leftover]))
+
+    assert provision.main(["new", "--upn", "taylor.e"]) == 0
+
+    assert not [call for call in client.calls if call[0] == "find_users_by_name"]
+
+
+def test_duplicate_upn_from_graph_points_at_reuse(wire, capsys):
+    error = GraphError(
+        "Graph API error (400) — Request_BadRequest: Another object with the same "
+        "value for property userPrincipalName already exists.", status=400,
+    )
+    wire(FakeGraph(create_error=error))
+
+    assert provision.main(["new"]) == 1
+
+    err = capsys.readouterr().err
+    assert "texample@example.com already exists" in err
+    assert "reuse --upn texample --yes --force" in err
+
+
+# --- dry run --------------------------------------------------------------------------
+
+def test_dry_run_writes_nothing_and_rehearses_the_email(wire, monkeypatch, capsys):
+    client = wire(FakeGraph())
+    drafts = []
+    monkeypatch.setattr(provision, "email_draft", lambda *a, **k: drafts.append(k))
+
+    assert provision.main(["new", "--dry-run", "--open-draft"]) == 0
+
+    assert client.writes == []
+    assert "[dry-run] would create Property Manager at Elm Court (texample@example.com)" in capsys.readouterr().out
+    # The draft step is told it is a rehearsal, so it can't sign in or write a draft.
+    assert drafts and drafts[0]["dry"] is True and drafts[0]["open_draft"] is True
+
+
+# --- what a fresh account is created with ----------------------------------------
+
+def test_create_payload_carries_the_documented_fields(wire, capsys):
+    client = wire(FakeGraph())
+
+    assert provision.main(["new"]) == 0
+
+    (_, payload), = [call for call in client.writes if call[0] == "create_user"]
+    assert payload["accountEnabled"] is True
+    assert payload["userPrincipalName"] == f"texample@{DOMAIN}"
+    assert payload["mailNickname"] == "texample"
+    assert payload["displayName"] == "Property Manager at Elm Court"
+    assert (payload["givenName"], payload["surname"]) == ("Taylor", "Example")
+    assert payload["usageLocation"] == "US"
+    assert payload["passwordProfile"] == {"password": "Temp-Pass-1!", "forceChangePasswordNextSignIn": True}
+    # The contact fields the README promises: title, office, department.
+    assert payload["jobTitle"] == "Property Manager"
+    assert payload["officeLocation"] == "Elm Court"
+    assert payload["department"] == "619"
+    out = capsys.readouterr().out
+    assert f"created Property Manager at Elm Court (texample@{DOMAIN})" in out
+    assert "temp password: Temp-Pass-1!" in out
+
+
+def test_a_corporate_hire_keeps_a_personal_display_name(wire, monkeypatch):
+    monkeypatch.setattr(provision, "load_hire", lambda: dict(HIRE, property_number="50", property_name="Head Office"))
+    client = wire(FakeGraph())
+
+    provision.main(["new"])
+
+    (_, payload), = [call for call in client.writes if call[0] == "create_user"]
+    assert payload["displayName"] == "Taylor Example"
+    assert payload["department"] == "50"
+
+
+def test_a_taken_explicit_upn_stops_the_run_instead_of_being_replaced(wire, capsys):
+    client = wire(FakeGraph(existing={f"tsmith2@{DOMAIN}": "Tom Smith"}))
+
+    assert provision.main(["new", "--upn", "tsmith2"]) == 1
+
+    assert client.writes == []
+    captured = capsys.readouterr()
+    assert f"tsmith2@{DOMAIN} already exists" in captured.out
+    assert "that UPN is taken" in captured.err
+    # No ladder: an explicit UPN is a decision, not a starting point.
+    assert [call[1] for call in client.calls if call[0] == "get_user"] == [f"tsmith2@{DOMAIN}"]
+
+
+def test_an_explicit_bare_upn_gets_the_tenant_domain(wire):
+    client = wire(FakeGraph())
+
+    assert provision.main(["new", "--upn", "taylor.e"]) == 0
+
+    (_, payload), = [call for call in client.writes if call[0] == "create_user"]
+    assert payload["userPrincipalName"] == f"taylor.e@{DOMAIN}"
+    assert payload["mailNickname"] == "taylor.e"
+
+
+def test_the_temp_password_never_reaches_the_audit_log(wire, tmp_path):
+    wire(FakeGraph())
+
+    provision.main(["new"])
+
+    logs = list((tmp_path / "logs").glob("provision-*.log"))
+    assert logs and "Temp-Pass-1!" not in logs[0].read_text(encoding="utf-8")

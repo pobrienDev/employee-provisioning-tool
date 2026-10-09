@@ -1,4 +1,7 @@
-requests
-python-dotenv
-pyyaml
-pillow
+# Exact pins: this tool holds tenant-wide write access, so a new release
+# (or a compromised package) must never reach it unreviewed. Dependabot
+# opens a pull request when a newer version exists; bump on purpose.
+requests==2.34.2
+python-dotenv==1.2.3
+pyyaml==6.0.3
+pillow==12.3.0

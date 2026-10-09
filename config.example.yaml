@@ -25,7 +25,7 @@ license_sku: ""
 # Or replace license_sku with rule-based chains: the hire's chain is picked by
 # who they are (corporate property / maintenance title / everyone else), and
 # the first SKU in it with free seats is assigned — checked live, which needs
-# the Organization.Read.All permission. Entries are skuPartNumber values or
+# the LicenseAssignment.Read.All permission. Entries are skuPartNumber values or
 # skuId GUIDs from `python provision.py skus`; a one-entry chain means "this
 # SKU or nothing".
 # licensing:
