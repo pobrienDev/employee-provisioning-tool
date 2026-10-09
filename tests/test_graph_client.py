@@ -332,3 +332,54 @@ def test_without_an_env_file_the_environment_is_used(monkeypatch, tmp_path):
     monkeypatch.setenv("CLIENT_SECRET", "s")
 
     assert GraphClient.from_env().tenant_id == "t"
+
+
+# --- the delegated refresh token cache ------------------------------------------
+
+import json
+import os
+
+from graph_api import DelegatedGraphClient, forget_sign_in
+
+
+@pytest.fixture
+def token_paths(monkeypatch, tmp_path):
+    new = tmp_path / "profile" / "token_cache.json"
+    legacy = tmp_path / "repo" / ".token_cache.json"
+    legacy.parent.mkdir()
+    monkeypatch.setattr(graph_api, "TOKEN_CACHE", new)
+    monkeypatch.setattr(graph_api, "LEGACY_TOKEN_CACHE", legacy)
+    return new, legacy
+
+
+def test_refresh_token_is_stored_under_the_profile_owner_only(token_paths):
+    new, legacy = token_paths
+    legacy.write_text('{"refresh_token": "old"}', encoding="utf-8")
+    client = DelegatedGraphClient("tenant-id", "client-id", None)
+
+    client._store({"access_token": "a", "expires_in": 3600, "refresh_token": "fresh"})
+
+    assert json.loads(new.read_text(encoding="utf-8")) == {"refresh_token": "fresh"}
+    assert not legacy.exists()   # the copy inside the repo folder is gone
+    if os.name != "nt":
+        assert oct(new.stat().st_mode & 0o777) == "0o600"
+
+
+def test_a_cache_left_by_an_older_version_is_still_honored(token_paths):
+    new, legacy = token_paths
+    legacy.write_text('{"refresh_token": "old"}', encoding="utf-8")
+
+    assert DelegatedGraphClient._cached_refresh_token() == "old"
+
+
+def test_sign_out_removes_both_cache_locations(token_paths):
+    new, legacy = token_paths
+    new.parent.mkdir()
+    new.write_text("{}", encoding="utf-8")
+    legacy.write_text("{}", encoding="utf-8")
+
+    removed = forget_sign_in()
+
+    assert set(removed) == {str(new), str(legacy)}
+    assert not new.exists() and not legacy.exists()
+    assert forget_sign_in() == []

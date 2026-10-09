@@ -130,7 +130,11 @@ Optional permissions unlock extras:
 - **Delegated** `Mail.ReadWrite` plus "Allow public client flows" (on the
   app registration's Authentication page) — unlocks `--open-draft` and
   `capture-signature`, which sign in as the operator (device-code prompt)
-  and touch only that one mailbox.
+  and touch only that one mailbox. The refresh token from that sign-in is
+  cached outside the repo, under your own profile
+  (`%LOCALAPPDATA%\employee-provisioning-tool\token_cache.json` on Windows,
+  `~/.config/employee-provisioning-tool/` elsewhere) with owner-only
+  permissions; `python provision.py sign-out` deletes it.
 - Not a permission, but a prerequisite: `--join-dls` and `--convert-shared`
   shell out to Exchange Online PowerShell, so they need
   `Install-Module ExchangeOnlineManagement` and an Exchange admin or
@@ -153,6 +157,7 @@ python provision.py reuse --yes           # actually hand it over
 python provision.py reuse --upn manager619 --yes
 python provision.py skus                  # license SKU IDs for config.yaml
 python provision.py capture-signature     # one-time: save your Outlook signature for --open-draft
+python provision.py sign-out              # forget the cached delegated sign-in
 python provision.py terminate manager619        # preview the offboarding plan
 python provision.py terminate manager619 --yes  # actually offboard
 python provision.py terminate manager619 --yes --convert-shared  # ...keeping mail in a shared mailbox

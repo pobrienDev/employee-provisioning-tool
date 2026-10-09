@@ -28,7 +28,37 @@ DEVICE_CODE_URL = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/device
 # Mail.ReadWrite as the signed-in user reaches that one mailbox and nothing
 # else. offline_access adds the refresh token that keeps sign-ins occasional.
 DELEGATED_SCOPE = "https://graph.microsoft.com/Mail.ReadWrite offline_access"
-TOKEN_CACHE = Path(__file__).parent / ".token_cache.json"
+
+
+def _token_cache_dir():
+    """Per-user, non-synced application data: %LOCALAPPDATA% on Windows,
+    ~/.config elsewhere. Kept out of the repo folder, which may be backed
+    up, synced, or readable by other local users."""
+    base = os.environ.get("LOCALAPPDATA") or (Path.home() / ".config")
+    return Path(base) / "employee-provisioning-tool"
+
+
+# The delegated refresh token. Anyone holding it can read and write the
+# operator's mailbox until it expires or is revoked, so it lives under the
+# user profile with owner-only permissions, not next to the script.
+TOKEN_CACHE = _token_cache_dir() / "token_cache.json"
+# Where earlier versions kept it: inside the repo folder. Read once for a
+# painless upgrade, then deleted.
+LEGACY_TOKEN_CACHE = Path(__file__).parent / ".token_cache.json"
+
+
+def forget_sign_in():
+    """Delete the cached delegated sign-in. Returns the paths removed."""
+    removed = []
+    for path in (TOKEN_CACHE, LEGACY_TOKEN_CACHE):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            continue
+        removed.append(str(path))
+    return removed
 
 # Credentials come from the .env next to this module. It is loaded with
 # override=True: a TENANT_ID still exported in the shell from some earlier
@@ -338,9 +368,10 @@ class DelegatedGraphClient(GraphClient):
     user's own mailbox and nothing else, which is why the tool never asks
     for the tenant-wide application version of that permission. Sign-in is
     the device-code flow — a code to enter at microsoft.com/devicelogin —
-    and the refresh token is cached in .token_cache.json (git-ignored) so
-    the prompt is occasional rather than per run. Requires the app
-    registration to allow public client flows.
+    and the refresh token is cached under the user profile (TOKEN_CACHE,
+    owner-only) so the prompt is occasional rather than per run;
+    forget_sign_in() deletes it. Requires the app registration to allow
+    public client flows.
     """
 
     @classmethod
@@ -371,22 +402,30 @@ class DelegatedGraphClient(GraphClient):
 
     @staticmethod
     def _cached_refresh_token():
-        try:
-            return json.loads(TOKEN_CACHE.read_text(encoding="utf-8")).get("refresh_token")
-        except (OSError, ValueError):
-            return None
+        for path in (TOKEN_CACHE, LEGACY_TOKEN_CACHE):
+            try:
+                return json.loads(path.read_text(encoding="utf-8")).get("refresh_token")
+            except (OSError, ValueError):
+                continue
+        return None
 
     def _store(self, payload):
         self._token = payload["access_token"]
         self._token_expires = time.time() + int(payload.get("expires_in", 3600)) - 60
         if payload.get("refresh_token"):
             try:
-                TOKEN_CACHE.write_text(
-                    json.dumps({"refresh_token": payload["refresh_token"]}),
-                    encoding="utf-8",
-                )
+                TOKEN_CACHE.parent.mkdir(parents=True, exist_ok=True)
+                # Create (or truncate) owner-only before any token lands in it.
+                fd = os.open(TOKEN_CACHE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(json.dumps({"refresh_token": payload["refresh_token"]}))
+                os.chmod(TOKEN_CACHE, 0o600)
             except OSError:
                 pass  # no cache just means the prompt comes back sooner
+            try:
+                LEGACY_TOKEN_CACHE.unlink()   # a copy in the repo folder is the exposure
+            except OSError:
+                pass
 
     def _redeem(self, data):
         """Try a token grant; True on success, False to fall back to sign-in."""

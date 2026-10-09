@@ -10,6 +10,7 @@ Commands:
   terminate <upn>       offboard: disable, revoke sessions, strip groups/licenses
   skus                  list license SKU IDs for config.yaml
   capture-signature     save your Outlook signature for --open-draft to append
+  sign-out              forget the cached delegated sign-in (refresh token)
 
 new, reuse, and terminate accept --dry-run: reads still hit the API so the
 output is realistic, but every write is replaced with a "[dry-run] would ..."
@@ -43,6 +44,7 @@ from graph_api import (
     DelegatedGraphClient,
     GraphClient,
     GraphError,
+    forget_sign_in,
 )
 
 BASE_DIR = Path(__file__).parent
@@ -1418,6 +1420,18 @@ def cmd_capture_signature(args):
     print("  back to the sign-off line so the draft doesn't carry it twice.")
 
 
+def cmd_sign_out(args):
+    """Delete the cached delegated sign-in so the next --open-draft or
+    capture-signature prompts for a fresh device-code sign-in."""
+    removed = forget_sign_in()
+    if removed:
+        act("cached delegated sign-in deleted — the next mailbox step will prompt again")
+        for path in removed:
+            print(f"    removed {path}")
+    else:
+        print("no cached delegated sign-in found")
+
+
 def group_kind(group):
     """How a membership can be ended: "graph" (normal group, removable via
     Graph), "exchange" (distribution list or mail-enabled security group —
@@ -1667,6 +1681,13 @@ def main(argv=None):
              "'signature-capture') for --open-draft to append; signs in as you",
     )
     capture.set_defaults(func=cmd_capture_signature)
+
+    sign_out = subparsers.add_parser(
+        "sign-out",
+        help="delete the cached delegated sign-in (refresh token) so "
+             "--open-draft and capture-signature prompt again",
+    )
+    sign_out.set_defaults(func=cmd_sign_out)
 
     terminate = subparsers.add_parser(
         "terminate", help="offboard an account: disable, revoke sessions, strip groups and licenses"
