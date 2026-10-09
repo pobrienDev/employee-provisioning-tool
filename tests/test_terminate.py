@@ -250,7 +250,7 @@ def test_every_action_lands_in_the_audit_log(wire, tmp_path):
 
     log = audit_text(tmp_path)
     assert f"terminate: {UPN}" in log
-    assert "account disabled, sessions revoked" in log
+    assert "account disabled" in log and "sessions revoked" in log
     assert "removed from group: Elm Court Staff" in log
     assert "removed 1 license(s)" in log
 
@@ -364,3 +364,25 @@ def test_every_write_command_announces_its_tenant_first(wire, capsys, tmp_path):
     out = capsys.readouterr().out
     assert out.index("tenant: tenant-1 (example.com)") < out.index("Terminating:")
     assert "tenant: tenant-1 (example.com)" in audit_text(tmp_path)
+
+
+# --- every write is logged as it lands -----------------------------------------
+
+def test_a_failed_revocation_still_logs_the_disable(wire, capsys, tmp_path):
+    class RevokeFails(FakeGraph):
+        def revoke_sessions(self, user_id):
+            super().revoke_sessions(user_id)
+            raise GraphError("Graph API error (503) — ServiceUnavailable", status=503)
+
+    client = wire(RevokeFails(make_user(), [STAFF]))
+
+    assert provision.main(["terminate", "manager619", "--yes"]) == 1
+
+    assert client.writes == [
+        ("update_user", USER_ID, {"accountEnabled": False}),
+        ("revoke_sessions", USER_ID),
+    ]
+    log = audit_text(tmp_path)
+    # The disable happened and the log must say so, ahead of the error.
+    assert log.index("account disabled") < log.index("error (terminate)")
+    assert "sessions revoked" not in log

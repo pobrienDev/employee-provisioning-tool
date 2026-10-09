@@ -1213,7 +1213,13 @@ def cmd_reuse(args):
                     "Nothing was changed."
                 ) from exc
             raise
+        # Each write is logged — and the password shown — the moment it
+        # lands, so a failure one step later can't leave a reset password
+        # that nobody saw and no log line admits to.
+        act("password reset to a temporary must-change password")
+        print(f"  temp password: {password}  (must change at first sign-in)")
         client.revoke_sessions(user["id"])
+        act("sessions revoked")
 
     # Wipe the previous holder's MFA registrations while the account is
     # still locked out — once it is enabled, any method still registered
@@ -1236,8 +1242,7 @@ def cmd_reuse(args):
         act(f"[dry-run] would rename to {display_name} and enable the account")
     else:
         client.update_user(user["id"], changes)
-        act(f"now: {display_name} — password reset, sessions revoked, account enabled")
-        print(f"  temp password: {password}  (must change at first sign-in)")
+        act(f"now: {display_name} — renamed and enabled")
         print("  mailbox history stays with the role account.")
 
     issues += provision_extras(
@@ -1614,10 +1619,12 @@ def cmd_terminate(args):
     if not args.yes:
         raise ProvisionError("nothing done — re-run with --yes to offboard this account")
 
-    # Lock out first, then clean up.
+    # Lock out first, then clean up — logging each write as it lands, so a
+    # failed revocation can't hide the disable that already happened.
     client.update_user(user["id"], {"accountEnabled": False})
+    act("account disabled")
     client.revoke_sessions(user["id"])
-    act("account disabled, sessions revoked")
+    act("sessions revoked")
 
     issues = []
     converted = not args.convert_shared  # nothing to wait on when not asked for

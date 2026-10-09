@@ -428,3 +428,37 @@ def test_an_auth_method_lookup_error_is_an_issue_not_an_abort(wire, capsys):
     assert client.writes[-1][2]["accountEnabled"] is True
     err = capsys.readouterr().err
     assert "could not read the account's authentication methods" in err
+
+
+# --- every write is logged (and the password shown) as it lands ----------------
+
+def test_a_failed_rename_still_logs_the_reset_and_shows_the_password(wire, capsys, tmp_path):
+    class RenameFails(FakeGraph):
+        def update_user(self, user_id, changes):
+            super().update_user(user_id, changes)
+            if "accountEnabled" in changes:
+                raise GraphError("Graph API error (503) — ServiceUnavailable", status=503)
+
+    client = wire(RenameFails(make_user(), methods=[PHONE]))
+
+    assert provision.main(["reuse", "--yes"]) == 1
+
+    # Password reset, sessions revoked and MFA wiped all happened...
+    assert [call[0] for call in client.writes] == [
+        "update_user", "revoke_sessions", "delete_auth_method", "update_user",
+    ]
+    log = audit_text(tmp_path)
+    # ...and each is on record, before the error, with the password shown.
+    assert log.index("password reset") < log.index("sessions revoked") < log.index("error (reuse)")
+    assert "temp password: Temp-Pass-1!" in capsys.readouterr().out
+
+
+def test_a_denied_password_reset_changes_nothing(wire, capsys):
+    client = wire(FakeGraph(make_user(), methods=[PHONE], deny_password=True))
+
+    assert provision.main(["reuse", "--yes"]) == 1
+
+    assert [call[0] for call in client.writes] == ["update_user"]   # the refused reset only
+    captured = capsys.readouterr()
+    assert "Nothing was changed" in captured.err
+    assert "temp password" not in captured.out
