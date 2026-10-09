@@ -69,12 +69,12 @@ one reviewed command.
 | Phase | Scope | State |
 |-------|-------|-------|
 | 1 | Client-credentials auth, list users | **done** |
-| 2 | `discover` lookup, collision-checked `new`, `reuse` with password reset + session revocation | **done** |
+| 2 | `discover` lookup, collision-checked `new`, `reuse` with password reset, session revocation and MFA wipe | **done** |
 | 3 | License assignment + property group membership (`skus` helper) | **done** |
 | 4 | Offboarding: `terminate` — disable, revoke sessions, strip groups and licenses | **done** |
 | 5 | `--dry-run`, audit logging, per-hire checklist, login-info email draft | **done** |
-| 5+ | Extras: rule-based licensing, DL joins (`--join-dls`), shared-mailbox conversion (`--convert-shared`), clipboard-ready email, Outlook draft with captured signature (`--open-draft`) | **done** |
-| 6 | Zendesk integration (pull the Formstack fields from the ticket automatically) | stretch |
+| 5+ | Extras: rule-based licensing, DL joins (`--join-dls`), shared-mailbox conversion (`--convert-shared`), clipboard-ready email, Outlook draft with captured signature (`--open-draft`, `capture-signature`), properties run as one (`720/721`), display-name wording (`title_display`) | **done** |
+| 6 | Zendesk integration: pull the Formstack fields from the ticket automatically | stretch — blocked by inconsistent form submissions |
 
 ## Setup
 
