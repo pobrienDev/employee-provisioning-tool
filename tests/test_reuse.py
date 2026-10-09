@@ -461,6 +461,10 @@ def test_a_denied_password_reset_changes_nothing(wire, capsys):
     assert [call[0] for call in client.writes] == ["update_user"]   # the refused reset only
     captured = capsys.readouterr()
     assert "Nothing was changed" in captured.err
+    # A 403 can mean the permission, the role, or an admin target — say so.
+    assert "User-PasswordProfile.ReadWrite.All" in captured.err
+    assert "User Administrator" in captured.err
+    assert "admin role" in captured.err
     assert "temp password" not in captured.out
 
 

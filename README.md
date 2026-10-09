@@ -117,9 +117,16 @@ one reviewed command.
 
 Optional permissions unlock extras:
 
-- `User-PasswordProfile.ReadWrite.All` — required for the password reset in
-  `reuse` (app-only password changes aren't covered by `User.ReadWrite.All`;
-  without it, `reuse` stops cleanly before changing anything).
+- `User-PasswordProfile.ReadWrite.All` **plus the User Administrator
+  directory role** — required for the password reset in `reuse`. App-only
+  password changes aren't covered by `User.ReadWrite.All`, and Microsoft's
+  `user: update` reference adds that in app-only scenarios the calling app
+  must also be assigned at least the User Administrator role: Entra admin
+  center → Roles and administrators → User Administrator → Add assignment →
+  pick the app's service principal. That role resets non-admin accounts
+  only; an account holding an admin role needs Privileged Authentication
+  Administrator, which the tool deliberately doesn't ask for. Without
+  either piece, `reuse` stops cleanly before changing anything.
 - `AuditLog.Read.All` (plus an Entra ID P1 license) — lets `discover` show
   last sign-in times; without it the column is skipped.
 - `LicenseAssignment.Read.All` — lets `skus` list the tenant's license SKUs

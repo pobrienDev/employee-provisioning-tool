@@ -1349,10 +1349,13 @@ def cmd_reuse(args):
         except GraphError as exc:
             if exc.status == 403:
                 raise ProvisionError(
-                    "password reset was denied — app-only password changes need the "
-                    "User-PasswordProfile.ReadWrite.All application permission "
-                    "(admin-consented); User.ReadWrite.All alone doesn't cover them. "
-                    "Nothing was changed."
+                    "password reset was denied — app-only password changes need "
+                    "both the User-PasswordProfile.ReadWrite.All application "
+                    "permission (admin-consented) and the User Administrator "
+                    "directory role assigned to the app; User.ReadWrite.All alone "
+                    "doesn't cover them. If the app has both, the target holds an "
+                    "admin role that User Administrator can't reset. Nothing was "
+                    "changed."
                 ) from exc
             raise
         # Each write is logged — and the password shown — the moment it
