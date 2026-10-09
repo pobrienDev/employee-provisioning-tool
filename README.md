@@ -272,9 +272,13 @@ center.
 
 After provisioning, the tool prints the manual checklist of non-M365
 platforms marked on the form and a ready-to-paste login-info email (CC'ing
-the RPM when the form asks) — shown once, never saved to disk. The body also
-lands on the clipboard as rich text so a paste into Outlook keeps the login
-link clickable. With `--open-draft` (on `new` or `reuse`), the email is
+the RPM when the form asks). The tool prints the temporary password once and
+writes it to no file of its own, but the credential does travel with the
+draft: the body — password included — lands on the clipboard as rich text so
+a paste into Outlook keeps the login link clickable (Windows clipboard
+history or a synced clipboard keeps that copy until it's cleared or
+overwritten), and with `--open-draft` it sits in the draft, and later in
+Sent Items, like any other email. With `--open-draft` (on `new` or `reuse`), the email is
 created directly in **your Outlook Drafts folder** via the Graph API —
 recipients, subject, formatted body, any `email_attachments` from
 `config.yaml` (say, MFA setup instructions), and your captured signature

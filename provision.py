@@ -887,7 +887,7 @@ def email_draft(hire, display_name, upn, password, config=None, open_draft=False
             "{name}, {first}, {last}, {username}, {password}"
         ) from exc
 
-    print("\n--- login-info email draft (copy into your mail client; not sent, not saved) ---")
+    print("\n--- login-info email draft (not sent — you review and send it) ---")
     print(f"To: {to}")
     if cc:
         print(f"Cc: {cc}")
@@ -899,7 +899,11 @@ def email_draft(hire, display_name, upn, password, config=None, open_draft=False
     subject = parts[0].strip()
     body = parts[1].lstrip("\n") if len(parts) > 1 else parts[0]
     if copy_draft_to_clipboard(body):
-        print("  (body copied to the clipboard as rich text — paste into Outlook and the link stays clickable)")
+        print(
+            "  (body — temporary password included — copied to the clipboard as rich "
+            "text; paste into Outlook and the link stays clickable. Clipboard history "
+            "or a synced clipboard keeps that copy until it is cleared or overwritten.)"
+        )
     else:
         print("  (clipboard copy unavailable — after pasting in Outlook, click at the end of the link and press Enter to make it clickable)")
     audit(f"login-info email drafted for {upn}" + (" (cc RPM)" if cc else ""))
@@ -914,7 +918,10 @@ def email_draft(hire, display_name, upn, password, config=None, open_draft=False
         else:
             for warning in warnings:
                 act(f"outlook draft: {warning}")
-            act("draft created in your Outlook Drafts folder — review it and click Send yourself")
+            act(
+                "draft created in your Outlook Drafts folder — it holds the temporary "
+                "password until you send or delete it; review it and click Send yourself"
+            )
             if web_link:
                 print(f"  open it directly: {web_link}")
             if password is None:
