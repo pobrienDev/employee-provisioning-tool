@@ -396,7 +396,7 @@ def choose_license(client, config, hire):
         if exc.status == 403:
             problem = (
                 "license not assigned — checking seat availability needs the "
-                "Organization.Read.All application permission (admin-consented)"
+                "LicenseAssignment.Read.All application permission (admin-consented)"
             )
             return None, None, [], problem
         raise
@@ -894,7 +894,7 @@ def cmd_skus(args):
     except GraphError as exc:
         if exc.status == 403:
             raise ProvisionError(
-                "listing licenses needs the Organization.Read.All application "
+                "listing licenses needs the LicenseAssignment.Read.All application "
                 "permission (admin-consented)"
             ) from exc
         raise

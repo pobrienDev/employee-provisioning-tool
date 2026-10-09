@@ -27,13 +27,22 @@ one reviewed command.
   conversion, drafts in the operator's own mailbox) run as the *signed-in
   operator* behind explicit flags, borrowing the operator's rights for that
   moment instead of enlarging the app's.
-- **Scoped permissions:** the app registration carries only the two
-  application permissions the tool's core job needs — `User.ReadWrite.All`
-  and `Group.ReadWrite.All` — granted once up front so each phase doesn't
-  require a new admin-consent round. Anything beyond them (password-profile
-  writes, sign-in activity reads, the delegated mailbox scope) is added only
-  if a feature actually needs it, and the tenant-wide application version of
-  a permission is never taken where a delegated one does the job.
+- **Scoped permissions:** the app registration carries only the
+  least-privileged application permissions Microsoft's Graph reference lists
+  for the tool's core job — `User.ReadWrite.All` (create, update and disable
+  accounts; it also covers license assignment), `GroupMember.ReadWrite.All`
+  (add and remove group members, and read the groups it touches — not
+  `Group.ReadWrite.All`, which would let the app create, delete and
+  reconfigure every group) and `User.RevokeSessions.All` (the only
+  application permission the reference lists for `revokeSignInSessions`) —
+  granted once up front so each phase doesn't require a new admin-consent
+  round. Anything beyond them (password-profile writes, sign-in activity
+  reads, the delegated mailbox scope) is added only if a feature actually
+  needs it, and the tenant-wide application version of a permission is never
+  taken where a delegated one does the job. The production app registration
+  is configured by hand in the Entra admin center; the sandbox app in
+  [entra-terraform](https://github.com/pobrienDev/entra-terraform) codifies
+  the same permission list against a personal test tenant.
 - **Secrets stay out of the repo:** credentials live in a git-ignored `.env`,
   tenant-specific IDs in a git-ignored `config.yaml` (the committed
   `config.example.yaml` documents the shape). The `.gitignore` was the
@@ -63,9 +72,11 @@ one reviewed command.
 
 1. **App registration** (in a test tenant while developing):
    Entra admin center → App registrations → New registration. Then under
-   *API permissions*, add **application** permissions `User.ReadWrite.All`
-   and `Group.ReadWrite.All` (Microsoft Graph) and grant admin consent.
-   Under *Certificates & secrets*, create a client secret.
+   *API permissions*, add the **application** permissions
+   `User.ReadWrite.All`, `GroupMember.ReadWrite.All` and
+   `User.RevokeSessions.All` (Microsoft Graph) and grant admin consent. If
+   the group lookups in `new`/`reuse` come back 403, add `Group.Read.All`
+   as well. Under *Certificates & secrets*, create a client secret.
 
 2. **Python environment:**
 
@@ -92,8 +103,10 @@ Optional permissions unlock extras:
   without it, `reuse` stops cleanly before changing anything).
 - `AuditLog.Read.All` (plus an Entra ID P1 license) — lets `discover` show
   last sign-in times; without it the column is skipped.
-- `Organization.Read.All` — lets `skus` list the tenant's license SKUs and
-  their IDs.
+- `LicenseAssignment.Read.All` — lets `skus` list the tenant's license SKUs
+  and their IDs, and lets rule-based `licensing` check free seats live (the
+  reference's least-privileged permission for `subscribedSkus`;
+  `Organization.Read.All` also works but reads far more).
 - `UserAuthenticationMethod.ReadWrite.All` — lets `reuse` remove the
   previous holder's registered MFA methods (phone, Authenticator, security
   keys) so the new hire enrolls fresh; without it the step is skipped with a
@@ -171,7 +184,7 @@ always addresses the person by name either way.
 The tool then assigns the configured license — either the flat `license_sku`,
 or rule-based `licensing` chains keyed by who the hire is (corporate property,
 maintenance title, or everyone else), where the first SKU with free seats
-wins, seat counts checked live via `Organization.Read.All`. With neither
+wins, seat counts checked live via `LicenseAssignment.Read.All`. With neither
 configured the step is skipped with a note. It then joins the account to every group the hire
 qualifies for, merged from three sources in `config.yaml`: the property's
 own groups, a corporate-or-site set (chosen by comparing the property
