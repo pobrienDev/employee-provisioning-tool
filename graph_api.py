@@ -331,13 +331,27 @@ class GraphClient:
                     status=response.status_code,
                 )
 
+    def _get_all(self, path, params=None):
+        """GET a collection, following @odata.nextLink to the end.
+
+        Graph pages most collections (users at 100 by default), so every
+        list call goes through here rather than reading the first page and
+        calling it the whole answer.
+        """
+        items = []
+        url = path
+        while url:
+            page = self._request("GET", url, params=params).json()
+            items.extend(page.get("value", []))
+            url = page.get("@odata.nextLink")
+            params = None   # a nextLink carries its own query string
+        return items
+
     def find_drafts(self, subject, select="id,subject,lastModifiedDateTime"):
         """Drafts whose subject matches exactly (delegated only)."""
         escaped = subject.replace("'", "''")
         params = {"$filter": f"subject eq '{escaped}'", "$select": select}
-        return self._request(
-            "GET", "/me/mailFolders/drafts/messages", params=params
-        ).json().get("value", [])
+        return self._get_all("/me/mailFolders/drafts/messages", params=params)
 
     def get_message(self, message_id, select="id,subject,body"):
         """One message from the signed-in mailbox (delegated only)."""
@@ -351,23 +365,17 @@ class GraphClient:
 
     def list_users(self):
         """Return all users in the tenant, following paging links."""
-        users = []
-        url = "/users?$select=displayName,userPrincipalName,jobTitle,accountEnabled"
-        while url:
-            page = self._request("GET", url).json()
-            users.extend(page.get("value", []))
-            url = page.get("@odata.nextLink")
-        return users
+        return self._get_all("/users?$select=displayName,userPrincipalName,jobTitle,accountEnabled")
 
     def find_users(self, upn_prefix, select):
-        """Return users whose userPrincipalName starts with the prefix."""
+        """Return every user whose userPrincipalName starts with the prefix."""
         # OData string literals escape single quotes by doubling them.
         escaped = upn_prefix.replace("'", "''")
         params = {
             "$filter": f"startswith(userPrincipalName,'{escaped}')",
             "$select": select,
         }
-        return self._request("GET", "/users", params=params).json()["value"]
+        return self._get_all("/users", params=params)
 
     def address_holder(self, local, domain):
         """Who already receives mail at local@domain, or None.
@@ -407,7 +415,7 @@ class GraphClient:
             "$filter": f"givenName eq '{given}' and surname eq '{family}'",
             "$select": select,
         }
-        return self._request("GET", "/users", params=params).json()["value"]
+        return self._get_all("/users", params=params)
 
     def get_user(self, upn_or_id, select):
         """Return one user, or None if no such account exists."""
@@ -443,7 +451,7 @@ class GraphClient:
 
     def list_skus(self):
         """Return the tenant's subscribed license SKUs."""
-        return self._request("GET", "/subscribedSkus").json().get("value", [])
+        return self._get_all("/subscribedSkus")
 
     def get_group(self, group_id, select="displayName"):
         """Return a group, or None if no such group exists."""
@@ -469,16 +477,10 @@ class GraphClient:
         memberOf returns groups, directory roles and administrative units
         together; callers ask for the kind they can act on.
         """
-        found = []
-        url = f"/users/{user_id}/memberOf?$select={select}"
-        while url:
-            page = self._request("GET", url).json()
-            found.extend(
-                item for item in page.get("value", [])
-                if item.get("@odata.type") == odata_type
-            )
-            url = page.get("@odata.nextLink")
-        return found
+        return [
+            item for item in self._get_all(f"/users/{user_id}/memberOf?$select={select}")
+            if item.get("@odata.type") == odata_type
+        ]
 
     def get_member_groups(self, user_id):
         """Return the groups the user belongs to, with enough of each
@@ -507,8 +509,7 @@ class GraphClient:
 
     def list_auth_methods(self, user_id):
         """Return the user's registered authentication methods."""
-        url = f"/users/{user_id}/authentication/methods"
-        return self._request("GET", url).json().get("value", [])
+        return self._get_all(f"/users/{user_id}/authentication/methods")
 
     def delete_auth_method(self, user_id, method_path, method_id):
         """Delete one registered authentication method by its typed endpoint."""

@@ -623,3 +623,38 @@ def test_attempt_count_is_configurable(sleeps):
         client.list_skus()
 
     assert len(client.session.requests) == 5
+
+
+# --- every list call follows paging -------------------------------------------------
+
+def test_find_users_follows_paging_without_resending_the_filter():
+    next_link = f"{GRAPH_BASE}/users?$skiptoken=page2"
+    client = make_client([
+        FakeResponse(200, {"value": [{"id": "u1"}], "@odata.nextLink": next_link}),
+        FakeResponse(200, {"value": [{"id": "u2"}]}),
+    ])
+
+    users = client.find_users("manager", "id")
+
+    assert [u["id"] for u in users] == ["u1", "u2"]
+    (_, u1, _, k1), (_, u2, _, k2) = client.session.requests
+    assert u1 == f"{GRAPH_BASE}/users" and "$filter" in k1["params"]
+    # The nextLink already carries the filter and skiptoken; no params go with it.
+    assert u2 == next_link and k2["params"] is None
+
+
+@pytest.mark.parametrize("call, path", [
+    (lambda c: c.list_skus(), "/subscribedSkus"),
+    (lambda c: c.list_auth_methods("user-1"), "/users/user-1/authentication/methods"),
+    (lambda c: c.find_drafts("signature-capture"), "/me/mailFolders/drafts/messages"),
+    (lambda c: c.find_users_by_name("A", "B", "id"), "/users"),
+])
+def test_list_calls_read_past_the_first_page(call, path):
+    next_link = f"{GRAPH_BASE}{path}?$skiptoken=x"
+    client = make_client([
+        FakeResponse(200, {"value": [{"id": 1}], "@odata.nextLink": next_link}),
+        FakeResponse(200, {"value": [{"id": 2}]}),
+    ])
+
+    assert [item["id"] for item in call(client)] == [1, 2]
+    assert client.session.requests[1][1] == next_link
