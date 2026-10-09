@@ -94,6 +94,11 @@ one reviewed command.
    pip install -r requirements.txt
    ```
 
+   `requirements.txt` pins exact versions: a tool with tenant-wide write
+   access shouldn't pick up whatever release is newest on install day.
+   Dependabot (`.github/dependabot.yml`) proposes upgrades as pull
+   requests, each run through the test suite before merging.
+
 3. **Credentials:** copy `.env.example` to `.env` and fill in the tenant ID,
    client (application) ID, and client secret from the app registration.
    That secret is a tenant-wide credential: with the permissions above,
