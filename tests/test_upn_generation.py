@@ -10,6 +10,7 @@ Run from the repo root:  python -m pytest -q
 
 import pytest
 
+from graph_api import GraphError
 from provision import ProvisionError, pick_upn, sanitize_local
 
 CONFIG = {"tenant": {"domain": "d.com"}}
@@ -25,15 +26,21 @@ class FakeGraph:
 
       FakeGraph(existing)      existing maps a UPN -> the display name of an
                                account that already exists
+      FakeGraph(aliases=...)   aliases maps an address -> who already
+                               receives mail there (an alias, a group...)
       .get_user(upn, select)   records upn in .attempted, then answers like
                                the real client: a dict with "id" and
                                "displayName" when the UPN exists, else None
+      .address_holder(local, domain)  answers from aliases, recording the
+                               address in .alias_checks
       .attempted               every UPN queried, in call order
     """
 
-    def __init__(self, existing=None):
+    def __init__(self, existing=None, aliases=None):
         self.existing = dict(existing or {})
+        self.aliases = dict(aliases or {})
         self.attempted = []
+        self.alias_checks = []
 
     def get_user(self, upn, select):
         # `select` is part of the real client's signature; the fake honors the
@@ -42,6 +49,11 @@ class FakeGraph:
         if upn in self.existing:
             return {"id": f"id-{len(self.attempted)}", "displayName": self.existing[upn]}
         return None
+
+    def address_holder(self, local, domain):
+        address = f"{local}@{domain}"
+        self.alias_checks.append(address)
+        return self.aliases.get(address)
 
 
 def hire(first, last):
@@ -109,3 +121,36 @@ def test_unusable_name_raises_before_any_lookup():
     with pytest.raises(ProvisionError):
         pick_upn(fake, hire("文", "字"), CONFIG)  # no ASCII letters survive
     assert fake.attempted == []
+
+
+# --- addresses that aren't UPNs still count as taken ------------------------------
+
+def test_an_email_alias_on_another_account_counts_as_taken():
+    # The tool told someone to add tsmith@ as an alias on manager536@; a
+    # later Tom Smith must not be given it as a "free" UPN.
+    fake = FakeGraph(aliases={"tsmith@d.com": "Property Manager at Elm Court, manager536@d.com"})
+    assert pick_upn(fake, hire("Tom", "Smith"), CONFIG) == "tosmith@d.com"
+    assert fake.alias_checks == ["tsmith@d.com", "tosmith@d.com"]
+
+
+def test_a_group_address_counts_as_taken():
+    fake = FakeGraph(aliases={"sales@d.com": "Sales Team, sales@d.com"})
+    assert pick_upn(fake, hire("S", "Ales"), CONFIG) == "sales2@d.com"
+
+
+def test_the_upn_check_comes_first_and_skips_the_alias_check_for_taken_upns():
+    fake = FakeGraph(existing={"jsmith@d.com": "Jane Smith"})
+    assert pick_upn(fake, hire("John", "Smith"), CONFIG) == "josmith@d.com"
+    # No alias lookup for a UPN that is already taken outright.
+    assert fake.alias_checks == ["josmith@d.com"]
+
+
+def test_a_failed_alias_check_warns_once_and_falls_back_to_the_upn_check(capsys):
+    class AliasLookupBroken(FakeGraph):
+        def address_holder(self, local, domain):
+            raise GraphError("Graph API error (400) — Request_UnsupportedQuery", status=400)
+
+    fake = AliasLookupBroken(existing={"jsmith@d.com": "Jane Smith"})
+    assert pick_upn(fake, hire("John", "Smith"), CONFIG) == "josmith@d.com"
+    out = capsys.readouterr().out
+    assert out.count("warning: could not check whether") == 1

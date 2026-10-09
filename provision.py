@@ -373,6 +373,12 @@ def pick_upn(client, hire, config):
     Tries first initial + last name, then two letters of the first name,
     three, and so on through the full first name; falls back to numbered
     variants if every letter-based one is taken.
+
+    "Taken" means an existing UPN, or an address some user or group
+    already receives mail at — a primary address, an alias in
+    proxyAddresses (the tool itself suggests personal aliases for role
+    accounts) or a mail nickname — since a UPN that collides with one of
+    those would be an account whose mail lands somewhere else.
     """
     domain = tenant_domain(config)
     first = sanitize_local(hire["first_name"])
@@ -386,13 +392,30 @@ def pick_upn(client, hire, config):
     stems = list(dict.fromkeys(stems))
     candidates = stems + [f"{stems[-1]}{n}" for n in range(2, 10)]
 
+    alias_check = True
     for local in candidates:
         upn = f"{local}@{domain}"
         existing = client.get_user(upn, "id,displayName")
-        if existing is None:
-            return upn
-        holder = existing.get("displayName") or "existing account"
-        print(f"  {upn} taken ({holder}) — trying next")
+        if existing is not None:
+            holder = existing.get("displayName") or "existing account"
+            print(f"  {upn} taken ({holder}) — trying next")
+            continue
+        if alias_check:
+            try:
+                holder = client.address_holder(local, domain)
+            except GraphError as exc:
+                # Still a usable answer: the UPN itself is free. But say so
+                # loudly, since an alias collision would now go unnoticed.
+                print(
+                    f"  warning: could not check whether {upn} is already an email "
+                    f"alias ({exc}) — verify in the admin center before relying on it"
+                )
+                alias_check = False
+                holder = None
+            if holder:
+                print(f"  {upn} taken as an email address ({holder}) — trying next")
+                continue
+        return upn
     raise ProvisionError("no available UPN found after trying every variant — pass --upn")
 
 

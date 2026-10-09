@@ -423,3 +423,40 @@ def test_idempotent_writes_still_retry_outages(sleeps):
     client.update_user("user-1", {"jobTitle": "Manager"})
 
     assert len(client.session.requests) == 2
+
+
+# --- address collisions beyond the UPN -----------------------------------------
+
+def test_address_holder_checks_mail_aliases_and_nickname_on_users_then_groups():
+    client = make_client([
+        FakeResponse(200, {"value": []}),
+        FakeResponse(200, {"value": [{"displayName": "Sales Team", "mail": "sales@d.com"}]}),
+    ])
+
+    assert client.address_holder("sales", "d.com") == "Sales Team, sales@d.com"
+
+    (_, u1, _, k1), (_, u2, _, k2) = client.session.requests
+    assert (u1, u2) == (f"{GRAPH_BASE}/users", f"{GRAPH_BASE}/groups")
+    for kwargs in (k1, k2):
+        flt = kwargs["params"]["$filter"]
+        assert "mail eq 'sales@d.com'" in flt
+        assert "mailNickname eq 'sales'" in flt
+        assert "proxyAddresses/any(p:p eq 'smtp:sales@d.com')" in flt
+        assert "proxyAddresses/any(p:p eq 'SMTP:sales@d.com')" in flt
+
+
+def test_address_holder_names_the_user_holding_an_alias():
+    client = make_client([
+        FakeResponse(200, {"value": [{"displayName": "Property Manager at Elm Court", "userPrincipalName": "manager536@d.com"}]}),
+    ])
+
+    assert client.address_holder("tsmith", "d.com") == "Property Manager at Elm Court, manager536@d.com"
+    assert len(client.session.requests) == 1   # found on users; groups not queried
+
+
+def test_address_holder_escapes_apostrophes_in_the_filter():
+    client = make_client([FakeResponse(200, {"value": []}), FakeResponse(200, {"value": []})])
+
+    assert client.address_holder("o'brien", "d.com") is None
+
+    assert "mailNickname eq 'o''brien'" in client.session.requests[0][3]["params"]["$filter"]

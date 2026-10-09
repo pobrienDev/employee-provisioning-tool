@@ -276,6 +276,36 @@ class GraphClient:
         }
         return self._request("GET", "/users", params=params).json()["value"]
 
+    def address_holder(self, local, domain):
+        """Who already receives mail at local@domain, or None.
+
+        A UPN lookup matches UPNs and object IDs only. Exchange also
+        delivers to every alias in proxyAddresses, to a group's address,
+        and routes on mailNickname — and this tool itself tells operators
+        to add personal aliases to role accounts. So before a UPN is
+        called free, users and groups are checked for the address in
+        mail or proxyAddresses (either case of the smtp: prefix) and for a
+        matching mailNickname. Returns a label naming the holder.
+        """
+        address = f"{local}@{domain}".replace("'", "''")
+        nickname = local.replace("'", "''")
+        clauses = (
+            f"mail eq '{address}' or mailNickname eq '{nickname}' "
+            f"or proxyAddresses/any(p:p eq 'smtp:{address}') "
+            f"or proxyAddresses/any(p:p eq 'SMTP:{address}')"
+        )
+        for kind, path, select in (
+            ("user", "/users", "displayName,userPrincipalName"),
+            ("group", "/groups", "displayName,mail"),
+        ):
+            params = {"$filter": clauses, "$select": select, "$top": "1"}
+            found = self._request("GET", path, params=params).json().get("value", [])
+            if found:
+                item = found[0]
+                where = item.get("userPrincipalName") or item.get("mail") or kind
+                return f"{item.get('displayName') or kind}, {where}"
+        return None
+
     def find_users_by_name(self, given_name, surname, select):
         """Users whose givenName and surname both match exactly."""
         given = given_name.replace("'", "''")

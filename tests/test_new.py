@@ -51,6 +51,10 @@ class FakeGraph:
         self.calls.append(("find_users_by_name", given_name, surname))
         return list(self.same_name)
 
+    def address_holder(self, local, domain):
+        self.calls.append(("address_holder", f"{local}@{domain}"))
+        return None
+
     def create_user(self, payload):
         self.calls.append(("create_user", payload))
         if self.create_error:

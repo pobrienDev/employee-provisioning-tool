@@ -173,7 +173,11 @@ passwords and personal contact details never go in the log.
 `new` builds the UPN from first initial + last name; if that's taken it
 automatically tries two letters of the first name, then three, and so on
 (numbered variants as a last resort), reporting each taken address and who
-holds it. An explicit `--upn` is never substituted — if it's taken, the run
+holds it. "Taken" covers more than existing UPNs: an address that any user
+or group already receives mail at — as its primary address, as an alias
+(`proxyAddresses`, including the personal aliases the tool itself suggests
+for role accounts) or as a mail nickname — is skipped too, so a new
+account's mail can't land in someone else's mailbox. An explicit `--upn` is never substituted — if it's taken, the run
 stops. The account is created with a temporary must-change password. If a
 `new` run is interrupted after the account exists (a network drop between
 the create and the license step, say), **don't run `new` again** — the UPN
