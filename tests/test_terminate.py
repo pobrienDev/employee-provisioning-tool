@@ -83,15 +83,24 @@ class FakeGraph:
         self.calls.append(("remove_licenses", user_id, list(sku_ids)))
 
 
-def make_user(licenses=("sku-business-premium",)):
-    return {
+def make_user(licenses=("sku-business-premium",), inherited=()):
+    """An account holding `licenses` directly and `inherited` through a
+    group; licenseAssignmentStates is only present when a group-assigned
+    license is involved, which also covers callers that never asked for it."""
+    user = {
         "id": USER_ID,
         "displayName": "Property Manager at Elm Court",
         "userPrincipalName": UPN,
         "accountEnabled": True,
         "jobTitle": "Property Manager",
-        "assignedLicenses": [{"skuId": sku} for sku in licenses],
+        "assignedLicenses": [{"skuId": sku} for sku in (*licenses, *inherited)],
     }
+    if inherited:
+        user["licenseAssignmentStates"] = (
+            [{"skuId": sku, "assignedByGroup": None, "state": "Active"} for sku in licenses]
+            + [{"skuId": sku, "assignedByGroup": "g-licensing", "state": "Active"} for sku in inherited]
+        )
+    return user
 
 
 @pytest.fixture
@@ -386,3 +395,59 @@ def test_a_failed_revocation_still_logs_the_disable(wire, capsys, tmp_path):
     # The disable happened and the log must say so, ahead of the error.
     assert log.index("account disabled") < log.index("error (terminate)")
     assert "sessions revoked" not in log
+
+
+# --- group-assigned licenses ------------------------------------------------------
+
+def test_group_assigned_licenses_are_not_removed_from_the_user(wire, capsys):
+    client = wire(FakeGraph(make_user(licenses=("sku-direct",), inherited=("sku-via-group",)), [STAFF]))
+
+    assert provision.main(["terminate", "manager619", "--yes"]) == 0
+
+    # Only the direct SKU goes in the call — an inherited one would make
+    # the whole assignLicense request fail.
+    assert ("remove_licenses", USER_ID, ["sku-direct"]) in client.writes
+    out = capsys.readouterr().out
+    assert "remove 1 license(s) (1 group-assigned follow the memberships)" in out
+    assert "1 group-assigned license(s) not removed directly" in out
+
+
+def test_an_account_with_only_group_licenses_has_nothing_to_remove(wire, capsys):
+    client = wire(FakeGraph(make_user(licenses=(), inherited=("sku-via-group",)), []))
+
+    assert provision.main(["terminate", "manager619", "--yes"]) == 0
+
+    assert not [call for call in client.writes if call[0] == "remove_licenses"]
+    assert "no licenses to remove" in capsys.readouterr().out
+
+
+def test_a_failed_license_removal_is_an_issue_not_a_crash(wire, capsys, tmp_path):
+    class RemoveFails(FakeGraph):
+        def remove_licenses(self, user_id, sku_ids):
+            super().remove_licenses(user_id, sku_ids)
+            raise GraphError("Graph API error (400) — Request_BadRequest: License assignment failed", status=400)
+
+    client = wire(RemoveFails(make_user(), [STAFF]))
+
+    assert provision.main(["terminate", "manager619", "--yes"]) == 1
+
+    assert ("remove_group_member", "g-staff", USER_ID) in client.writes
+    err = capsys.readouterr().err
+    assert "offboarding finished with issues" in err
+    assert "could not remove the license(s)" in err
+    assert "could not remove the license(s)" in audit_text(tmp_path)
+
+
+def test_split_licenses_without_assignment_states_treats_all_as_direct():
+    assert provision.split_licenses({"assignedLicenses": [{"skuId": "a"}, {"skuId": "b"}]}) == (["a", "b"], [])
+
+
+def test_split_licenses_keeps_a_sku_that_is_both_direct_and_inherited_as_direct():
+    user = {
+        "assignedLicenses": [{"skuId": "a"}],
+        "licenseAssignmentStates": [
+            {"skuId": "a", "assignedByGroup": None},
+            {"skuId": "a", "assignedByGroup": "g1"},
+        ],
+    }
+    assert provision.split_licenses(user) == (["a"], [])

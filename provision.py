@@ -1542,6 +1542,30 @@ def cmd_sign_out(args):
         print("no cached delegated sign-in found")
 
 
+def split_licenses(user):
+    """(directly assigned skuIds, group-inherited skuIds) for an account.
+
+    assignedLicenses lists inherited (group-based) licenses alongside direct
+    ones without saying which is which, and an inherited license can't be
+    removed from the user — the whole assignLicense call fails. The
+    licenseAssignmentStates property tells them apart: assignedByGroup is
+    null for a direct assignment. Without that property every license
+    counts as direct.
+    """
+    assigned = [lic["skuId"] for lic in user.get("assignedLicenses") or []]
+    states = user.get("licenseAssignmentStates")
+    if states is None:
+        return assigned, []
+    direct = {
+        state.get("skuId") for state in states
+        if state.get("skuId") and not state.get("assignedByGroup")
+    }
+    return (
+        [sku for sku in assigned if sku in direct],
+        [sku for sku in assigned if sku not in direct],
+    )
+
+
 def group_kind(group):
     """How a membership can be ended: "graph" (normal group, removable via
     Graph), "exchange" (distribution list or mail-enabled security group —
@@ -1564,7 +1588,7 @@ def cmd_terminate(args):
     upn = args.upn if "@" in args.upn or not domain else f"{args.upn}@{domain}"
     audit(f"terminate: {upn}{' (dry-run)' if dry else ''}")
 
-    user = client.get_user(upn, USER_FIELDS + ",assignedLicenses")
+    user = client.get_user(upn, USER_FIELDS + ",assignedLicenses,licenseAssignmentStates")
     if not user:
         raise ProvisionError(
             f"{upn} not found — note that accounts created moments ago can "
@@ -1573,7 +1597,7 @@ def cmd_terminate(args):
 
     groups = client.get_member_groups(user["id"])
     roles = client.get_member_roles(user["id"])
-    licenses = [lic["skuId"] for lic in user.get("assignedLicenses") or []]
+    licenses, inherited = split_licenses(user)
     # A shared mailbox usually exists so that mail keeps arriving — its
     # group and distribution-list memberships stay put.
     keep_groups = args.convert_shared
@@ -1583,6 +1607,13 @@ def cmd_terminate(args):
 
     def label(group):
         return group.get("displayName") or group["id"]
+
+    def inherited_note():
+        if inherited:
+            act(
+                f"{len(inherited)} group-assigned license(s) not removed directly — "
+                "they follow the group membership(s) that grant them"
+            )
 
     def exchange_notes():
         """Memberships the tool can't end itself. Returns the follow-ups
@@ -1637,6 +1668,7 @@ def cmd_terminate(args):
             act(f"[dry-run] would remove {len(licenses)} license(s)")
         else:
             act("no licenses to remove")
+        inherited_note()
         if not args.convert_shared:
             print("  manual step if mail must be retained: convert the mailbox to shared (Exchange admin center)")
         return
@@ -1653,6 +1685,7 @@ def cmd_terminate(args):
         f"  plan: disable account, revoke sessions,"
         f"{' convert the mailbox to shared,' if args.convert_shared else ''} "
         f"{group_plan}, remove {len(licenses)} license(s)"
+        + (f" ({len(inherited)} group-assigned follow the memberships)" if inherited else "")
     )
     if not args.yes:
         raise ProvisionError("nothing done — re-run with --yes to offboard this account")
@@ -1691,14 +1724,20 @@ def cmd_terminate(args):
     if not licenses:
         act("no licenses to remove")
     elif converted:
-        client.remove_licenses(user["id"], licenses)
-        act(f"removed {len(licenses)} license(s)")
+        try:
+            client.remove_licenses(user["id"], licenses)
+            act(f"removed {len(licenses)} license(s)")
+        except GraphError as exc:
+            msg = f"could not remove the license(s): {exc}"
+            act(msg)
+            issues.append(msg)
     else:
         # Pulling the license off an unconverted mailbox starts its deletion
         # clock — keep it until the conversion has actually happened.
         msg = "licenses kept — convert the mailbox first, then remove them"
         act(msg)
         issues.append(msg)
+    inherited_note()
 
     if not args.convert_shared:
         print("  manual step if mail must be retained: convert the mailbox to shared (Exchange admin center)")
