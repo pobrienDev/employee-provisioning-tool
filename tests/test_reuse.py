@@ -462,3 +462,63 @@ def test_a_denied_password_reset_changes_nothing(wire, capsys):
     captured = capsys.readouterr()
     assert "Nothing was changed" in captured.err
     assert "temp password" not in captured.out
+
+
+# --- a reused account's existing license ---------------------------------------
+
+def sku(part, sku_id, free=5):
+    return {"skuId": sku_id, "skuPartNumber": part, "prepaidUnits": {"enabled": 10}, "consumedUnits": 10 - free}
+
+
+SKUS = [sku("SPB", "sku-spb"), sku("STANDARDPACK", "sku-e1"), sku("VISIOCLIENT", "sku-visio")]
+
+
+def licensed_user(*sku_ids):
+    user = make_user()
+    user["assignedLicenses"] = [{"skuId": s} for s in sku_ids]
+    return user
+
+
+def with_chain(monkeypatch, *chain):
+    config = dict(CONFIG, licensing={"default": list(chain)})
+    monkeypatch.setattr(provision, "load_config", lambda: config)
+
+
+def test_a_license_already_in_the_chain_is_kept_not_doubled(wire, monkeypatch, capsys):
+    with_chain(monkeypatch, "SPB", "STANDARDPACK")
+    client = wire(FakeGraph(licensed_user("sku-e1"), skus=SKUS))
+
+    assert provision.main(["reuse", "--yes"]) == 0
+
+    assert not [call for call in client.writes if call[0] == "assign_license"]
+    assert "license kept — the account already holds STANDARDPACK" in capsys.readouterr().out
+
+
+def test_a_license_outside_the_chain_is_reported_not_stacked(wire, monkeypatch, capsys):
+    with_chain(monkeypatch, "SPB")
+    client = wire(FakeGraph(licensed_user("sku-visio"), skus=SKUS))
+
+    assert provision.main(["reuse", "--yes"]) == 1
+
+    assert not [call for call in client.writes if call[0] == "assign_license"]
+    err = capsys.readouterr().err
+    assert "already holds VISIOCLIENT, which isn't in the licensing.default chain" in err
+
+
+def test_an_unlicensed_account_gets_the_chain_pick(wire, monkeypatch):
+    with_chain(monkeypatch, "SPB")
+    client = wire(FakeGraph(licensed_user(), skus=SKUS))
+
+    assert provision.main(["reuse", "--yes"]) == 0
+
+    assert ("assign_license", USER_ID, "sku-spb") in client.writes
+
+
+def test_flat_license_sku_is_kept_when_already_held(wire, monkeypatch, capsys):
+    monkeypatch.setattr(provision, "load_config", lambda: dict(CONFIG, license_sku="sku-spb"))
+    client = wire(FakeGraph(licensed_user("SKU-SPB")))
+
+    assert provision.main(["reuse", "--yes"]) == 0
+
+    assert not [call for call in client.writes if call[0] == "assign_license"]
+    assert "license kept" in capsys.readouterr().out

@@ -217,7 +217,10 @@ The tool then assigns the configured license — either the flat `license_sku`,
 or rule-based `licensing` chains keyed by who the hire is (corporate property,
 maintenance title, or everyone else), where the first SKU with free seats
 wins, seat counts checked live via `LicenseAssignment.Read.All`. With neither
-configured the step is skipped with a note. It then joins the account to every group the hire
+configured the step is skipped with a note. On `reuse`, a role account that
+still carries a license from its chain keeps it and nothing is assigned; one
+carrying a license from outside its chain is reported as an issue rather
+than given a second paid seat. It then joins the account to every group the hire
 qualifies for, merged from three sources in `config.yaml`: the property's
 own groups, a corporate-or-site set (chosen by comparing the property
 number to `corporate_property`), and job-title groups (case-insensitive

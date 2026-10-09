@@ -425,7 +425,7 @@ def groups_for(hire, config):
     return list(dict.fromkeys(selected))
 
 
-def choose_license(client, config, hire):
+def choose_license(client, config, hire, held=()):
     """Pick the license SKU for this hire from config.yaml's licensing rules.
 
     The `licensing` section holds ordered fallback chains — corporate
@@ -435,15 +435,23 @@ def choose_license(client, config, hire):
     wins; a chain with one entry means "this SKU or nothing". Without a
     `licensing` section, the flat `license_sku` keeps its old behavior.
 
+    `held` is the skuIds the account already carries (a reused role account
+    that was only disabled keeps its license). One of them in the hire's
+    chain means nothing to assign; one outside the chain is reported rather
+    than doubled, since a second SKU is a second paid seat.
+
     Returns (sku_id, label, notes, problem): sku_id is None when nothing
     should be assigned, notes are act()-ready lines explaining the choice,
     and problem is set when the outcome should count as an issue.
     """
+    held_ids = {str(sku).lower() for sku in held if sku}
     licensing = config.get("licensing")
     if not isinstance(licensing, dict):
         sku = config.get("license_sku")
         if not sku:
             return None, None, ["license skipped — no licensing rules in config.yaml"], None
+        if str(sku).lower() in held_ids:
+            return None, None, [f"license kept — the account already holds {sku}"], None
         return sku, str(sku), [], None
 
     title = (hire.get("title") or "").lower()
@@ -474,7 +482,32 @@ def choose_license(client, config, hire):
         by_key[str(sku.get("skuId", "")).lower()] = sku
         by_key[str(sku.get("skuPartNumber", "")).lower()] = sku
 
+    def part_of(sku_id):
+        sku = by_key.get(str(sku_id).lower()) or {}
+        return sku.get("skuPartNumber") or str(sku_id)
+
     notes = []
+    if held_ids:
+        chain_ids = {
+            str(by_key[str(entry).lower()].get("skuId", "")).lower()
+            for entry in chain if str(entry).lower() in by_key
+        }
+        kept = sorted(part_of(sku_id) for sku_id in held_ids & chain_ids)
+        if kept:
+            notes.append(
+                f"license kept — the account already holds {', '.join(kept)} "
+                f"(in the licensing.{which} chain)"
+            )
+            return None, None, notes, None
+        holding = ", ".join(sorted(part_of(sku_id) for sku_id in held_ids))
+        problem = (
+            f"license not assigned — the account already holds {holding}, which "
+            f"isn't in the licensing.{which} chain "
+            f"({', '.join(str(entry) for entry in chain)}); swap it in the admin "
+            "center (or remove it and re-run) rather than paying for two seats"
+        )
+        return None, None, notes, problem
+
     for entry in chain:
         sku = by_key.get(str(entry).lower())
         if sku is None:
@@ -494,16 +527,19 @@ def choose_license(client, config, hire):
     return None, None, notes, problem
 
 
-def provision_extras(client, config, hire, user_id, dry, upn=None, join_dls=False):
+def provision_extras(client, config, hire, user_id, dry, upn=None, join_dls=False,
+                     held_licenses=()):
     """License and group membership, shared by new and reuse.
 
     Distribution lists print as manual steps unless join_dls asks for the
-    Exchange Online PowerShell path. Returns a list of issues rather than
-    raising, so one failure doesn't abandon the remaining steps.
+    Exchange Online PowerShell path. held_licenses is what the account
+    already carries, so reuse doesn't stack a second SKU on a role account
+    that kept its old one. Returns a list of issues rather than raising,
+    so one failure doesn't abandon the remaining steps.
     """
     issues = []
 
-    sku_id, label, notes, problem = choose_license(client, config, hire)
+    sku_id, label, notes, problem = choose_license(client, config, hire, held=held_licenses)
     for note in notes:
         act(note)
     if problem:
@@ -1165,9 +1201,10 @@ def cmd_reuse(args):
     upn = target if "@" in target or not domain else f"{target}@{domain}"
     audit(f"reuse: {upn}{' (dry-run)' if dry else ''}")
 
-    user = get_user_with_sign_in(client, upn)
+    user = get_user_with_sign_in(client, upn, USER_FIELDS + ",assignedLicenses")
     if not user:
         raise ProvisionError(f"{upn} not found — run discover first to see what exists")
+    held_licenses = [lic.get("skuId") for lic in user.get("assignedLicenses") or []]
 
     display_name = display_name_for(hire, config)
     print(f"Reusing {upn}:")
@@ -1246,7 +1283,8 @@ def cmd_reuse(args):
         print("  mailbox history stays with the role account.")
 
     issues += provision_extras(
-        client, config, hire, user["id"], dry, upn=upn, join_dls=args.join_dls
+        client, config, hire, user["id"], dry, upn=upn, join_dls=args.join_dls,
+        held_licenses=held_licenses,
     )
     issues += review_memberships(client, user["id"], hire, config)
     role_alias_note(client, hire, config, upn)
