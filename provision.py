@@ -681,6 +681,8 @@ def provision_extras(client, config, hire, user_id, dry, upn=None, join_dls=Fals
             client.assign_license(user_id, sku_id)
             act(f"license assigned: {label}")
         except GraphError as exc:
+            # Graph reports an exhausted SKU under the generic
+            # Request_BadRequest code, so the message text is the only signal.
             if "available licenses" in str(exc):
                 msg = "license not assigned — the last free seat was taken mid-run"
             else:
@@ -732,6 +734,8 @@ def provision_extras(client, config, hire, user_id, dry, upn=None, join_dls=Fals
             client.add_group_member(group_id, user_id)
             act(f"added to group: {label}")
         except GraphError as exc:
+            # "already a member" comes back as Request_BadRequest, the same
+            # code as a malformed request, so the message text has to do.
             if exc.status == 400 and "already exist" in str(exc):
                 act(f"already in group: {label}")
             else:
@@ -1344,6 +1348,8 @@ def cmd_new(args):
         try:
             created = client.create_user(payload)
         except GraphError as exc:
+            # A duplicate UPN is reported as Request_BadRequest, no more
+            # specific code, so the message text is matched here.
             if exc.status == 400 and "userPrincipalName already exists" in str(exc):
                 # The pre-check can miss an account created seconds ago — the
                 # directory lags a little before new UPNs are readable.
@@ -1599,6 +1605,8 @@ def join_distribution_lists(upn, dls):
             f"try {{ Add-DistributionGroupMember -Identity {ps_quote(gid)} "
             f"-Member {quoted_upn} -ErrorAction Stop; "
             f"Add-Content -Path {quoted_path} -Value {ps_quote(f'JOINED {gid}')} }} "
+            # Exchange gives no error code here; its English message text
+            # is the only way to tell "already a member" from a failure.
             f"catch {{ if (\"$_\" -match 'already a member') "
             f"{{ Add-Content -Path {quoted_path} -Value {ps_quote(f'JOINED {gid}')} }} else "
             f"{{ Add-Content -Path {quoted_path} -Value ({ps_quote(f'FAILED {gid} ')} + $_) }} }}"

@@ -204,14 +204,17 @@ def test_graph_error_carries_code_message_and_status():
         client.revoke_sessions("user-1")
 
     assert excinfo.value.status == 403
+    assert excinfo.value.code == "Authorization_RequestDenied"
     assert "Authorization_RequestDenied: Insufficient privileges" in str(excinfo.value)
 
 
 def test_non_json_error_body_falls_back_to_text():
     client = make_client([FakeResponse(500, text="upstream gateway exploded")])
 
-    with pytest.raises(GraphError, match="upstream gateway exploded"):
+    with pytest.raises(GraphError, match="upstream gateway exploded") as excinfo:
         client.list_skus()
+
+    assert excinfo.value.code is None
 
 
 # --- the calls offboarding depends on -----------------------------------------

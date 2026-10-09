@@ -101,11 +101,20 @@ class ConfigError(Exception):
 
 
 class GraphError(Exception):
-    """A Graph API call failed; the message carries the API's own error."""
+    """A Graph API call failed; the message carries the API's own error.
 
-    def __init__(self, message, status=None):
+    `status` is the HTTP status and `code` Graph's error code (for example
+    Authorization_RequestDenied), so callers can branch on the code rather
+    than on message text wherever Graph gives a specific one. Several
+    everyday failures — a duplicate UPN, a member already in a group, no
+    seats left — arrive under the generic Request_BadRequest code, so for
+    those the message text remains the only signal.
+    """
+
+    def __init__(self, message, status=None, code=None):
         super().__init__(message)
         self.status = status
+        self.code = code
 
 
 class GraphClient:
@@ -206,13 +215,13 @@ class GraphClient:
                 continue
             break
         if response.status_code >= 400:
-            message = self._error_message(response)
+            code, message = self._error_details(response)
             if not idempotent and response.status_code in (503, 504):
                 message += (
                     " — not retried: the request may already have been applied, "
                     "so check before running it again"
                 )
-            raise GraphError(message, status=response.status_code)
+            raise GraphError(message, status=response.status_code, code=code)
         return response
 
     def _retry_delay(self, response, attempt):
@@ -259,14 +268,16 @@ class GraphClient:
         )
 
     @staticmethod
-    def _error_message(response):
-        """Extract Graph's error code and message from an error response."""
+    def _error_details(response):
+        """(code, message) from a Graph error response; code is None when
+        the body isn't Graph's usual error shape."""
         try:
             error = response.json()["error"]
-            detail = f"{error['code']}: {error['message']}"
-        except (ValueError, KeyError, TypeError):
-            detail = response.text
-        return f"Graph API error ({response.status_code}) — {detail}"
+            code = error.get("code")
+            detail = f"{code}: {error.get('message')}"
+        except (ValueError, KeyError, TypeError, AttributeError):
+            code, detail = None, response.text
+        return code, f"Graph API error ({response.status_code}) — {detail}"
 
     def create_draft(self, payload):
         """Create a draft message in the signed-in mailbox (delegated only)."""
