@@ -30,9 +30,9 @@ DEVICE_CODE_URL = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/device
 DELEGATED_SCOPE = "https://graph.microsoft.com/Mail.ReadWrite offline_access"
 TOKEN_CACHE = Path(__file__).parent / ".token_cache.json"
 
-# Registered MFA method types -> the per-type endpoint used to delete them.
-# (passwordAuthenticationMethod is deliberately absent: passwords can't be
-# deleted, only reset.)
+# Registered MFA method types -> the per-type endpoint used to delete them:
+# every authenticationMethod type in the Graph v1.0 reference except
+# passwordAuthenticationMethod, which can't be deleted, only reset.
 AUTH_METHOD_PATHS = {
     "#microsoft.graph.microsoftAuthenticatorAuthenticationMethod": "microsoftAuthenticatorMethods",
     "#microsoft.graph.phoneAuthenticationMethod": "phoneMethods",
@@ -41,7 +41,13 @@ AUTH_METHOD_PATHS = {
     "#microsoft.graph.softwareOathAuthenticationMethod": "softwareOathMethods",
     "#microsoft.graph.windowsHelloForBusinessAuthenticationMethod": "windowsHelloForBusinessMethods",
     "#microsoft.graph.temporaryAccessPassAuthenticationMethod": "temporaryAccessPassMethods",
+    "#microsoft.graph.platformCredentialAuthenticationMethod": "platformCredentialMethods",
+    "#microsoft.graph.externalAuthenticationMethod": "externalAuthenticationMethods",
+    "#microsoft.graph.qrCodePinAuthenticationMethod": "qrCodePinMethod",
 }
+# A user has at most one of these, so the endpoint takes no method ID.
+SINGLETON_AUTH_METHOD_PATHS = {"qrCodePinMethod"}
+PASSWORD_METHOD_TYPE = "#microsoft.graph.passwordAuthenticationMethod"
 
 
 class ConfigError(Exception):
@@ -291,9 +297,10 @@ class GraphClient:
 
     def delete_auth_method(self, user_id, method_path, method_id):
         """Delete one registered authentication method by its typed endpoint."""
-        self._request(
-            "DELETE", f"/users/{user_id}/authentication/{method_path}/{method_id}"
-        )
+        path = f"/users/{user_id}/authentication/{method_path}"
+        if method_path not in SINGLETON_AUTH_METHOD_PATHS:
+            path += f"/{method_id}"
+        self._request("DELETE", path)
 
 
 class DelegatedGraphClient(GraphClient):

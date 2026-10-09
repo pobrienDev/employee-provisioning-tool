@@ -38,6 +38,7 @@ import yaml
 
 from graph_api import (
     AUTH_METHOD_PATHS,
+    PASSWORD_METHOD_TYPE,
     ConfigError,
     DelegatedGraphClient,
     GraphClient,
@@ -556,29 +557,45 @@ def reset_mfa(client, user_id, dry):
     Authenticator, security keys) so the next owner enrolls fresh.
 
     Used by reuse only: a terminated account is disabled outright, so its
-    registrations are left untouched. Returns a list of issues; a missing
-    permission degrades to a note.
+    registrations are left untouched. Returns a list of issues. Anything
+    that leaves a previous holder's method in place — a missing permission,
+    a method type this tool can't delete, a failed delete — is an issue,
+    because the new hire's MFA prompts would otherwise reach the old
+    holder's phone.
     """
     try:
         methods = client.list_auth_methods(user_id)
     except GraphError as exc:
         if exc.status == 403:
-            act(
-                "mfa reset skipped — needs the UserAuthenticationMethod."
-                "ReadWrite.All application permission (admin-consented)"
+            msg = (
+                "mfa not reset — needs the UserAuthenticationMethod.ReadWrite.All "
+                "application permission (admin-consented); remove the previous "
+                "holder's methods in the admin center (user → Authentication methods)"
             )
-            return []
+            act(msg)
+            return [msg]
         raise
 
+    issues = []
     removable = [m for m in methods if m.get("@odata.type") in AUTH_METHOD_PATHS]
+    for method in methods:
+        kind = method.get("@odata.type")
+        if kind in AUTH_METHOD_PATHS or kind == PASSWORD_METHOD_TYPE:
+            continue
+        label = (kind or "unknown").split(".")[-1].removesuffix("AuthenticationMethod")
+        msg = (
+            f"mfa method {label} left in place — this tool can't remove that "
+            "type; remove it in the admin center (user → Authentication methods)"
+        )
+        act(msg)
+        issues.append(msg)
     if not removable:
         act("no registered mfa methods to remove")
-        return []
+        return issues
     if dry:
         act(f"[dry-run] would remove {len(removable)} registered mfa method(s)")
-        return []
+        return issues
 
-    issues = []
     for method in removable:
         path = AUTH_METHOD_PATHS[method["@odata.type"]]
         label = path.removesuffix("Methods")

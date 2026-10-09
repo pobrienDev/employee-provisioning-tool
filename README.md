@@ -109,8 +109,10 @@ Optional permissions unlock extras:
   `Organization.Read.All` also works but reads far more).
 - `UserAuthenticationMethod.ReadWrite.All` — lets `reuse` remove the
   previous holder's registered MFA methods (phone, Authenticator, security
-  keys) so the new hire enrolls fresh; without it the step is skipped with a
-  note.
+  keys, passkeys, QR-code PIN, external MFA) so the new hire enrolls fresh;
+  without it the run still completes but reports the un-wiped methods as an
+  issue and exits 1, since the old holder's phone would otherwise answer the
+  new hire's MFA prompts.
 - **Delegated** `Mail.ReadWrite` plus "Allow public client flows" (on the
   app registration's Authentication page) — unlocks `--open-draft` and
   `capture-signature`, which sign in as the operator (device-code prompt)

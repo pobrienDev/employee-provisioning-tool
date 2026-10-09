@@ -22,6 +22,9 @@ UPN = f"manager619@{DOMAIN}"
 USER_ID = "user-1"
 
 PHONE = {"@odata.type": "#microsoft.graph.phoneAuthenticationMethod", "id": "m-phone"}
+PASSWORD = {"@odata.type": "#microsoft.graph.passwordAuthenticationMethod", "id": "m-pw"}
+QR_PIN = {"@odata.type": "#microsoft.graph.qrCodePinAuthenticationMethod", "id": "m-qr"}
+UNKNOWN = {"@odata.type": "#microsoft.graph.futureAuthenticationMethod", "id": "m-new"}
 AUTHENTICATOR = {
     "@odata.type": "#microsoft.graph.microsoftAuthenticatorAuthenticationMethod",
     "id": "m-app",
@@ -35,6 +38,8 @@ class FakeGraph:
       .writes        just the calls that would change the tenant
       deny_password  the password reset raises a 403, as it does when the
                      app lacks User-PasswordProfile.ReadWrite.All
+      deny_methods   list_auth_methods raises a 403, as it does when the
+                     app lacks UserAuthenticationMethod.ReadWrite.All
       methods        the MFA methods list_auth_methods hands back
     """
 
@@ -43,10 +48,11 @@ class FakeGraph:
         "assign_license", "add_group_member",
     }
 
-    def __init__(self, user=None, methods=(), deny_password=False, skus=()):
+    def __init__(self, user=None, methods=(), deny_password=False, deny_methods=False, skus=()):
         self.user = user
         self.methods = list(methods)
         self.deny_password = deny_password
+        self.deny_methods = deny_methods
         self.skus = list(skus)
         self.calls = []
 
@@ -68,6 +74,8 @@ class FakeGraph:
 
     def list_auth_methods(self, user_id):
         self.calls.append(("list_auth_methods", user_id))
+        if self.deny_methods:
+            raise GraphError("Graph API error (403) — Authorization_RequestDenied", status=403)
         return list(self.methods)
 
     def delete_auth_method(self, user_id, method_path, method_id):
@@ -244,3 +252,56 @@ def test_sign_in_activity_degrades_when_not_readable(wire):
 
     selects = [call[2] for call in client.calls if call[0] == "get_user"]
     assert "signInActivity" in selects[0] and "signInActivity" not in selects[1]
+
+
+# --- the MFA wipe must never fail quietly -------------------------------------
+
+def test_missing_mfa_permission_is_reported_and_exits_1(wire, capsys, tmp_path):
+    client = wire(FakeGraph(make_user(), deny_methods=True))
+
+    assert provision.main(["reuse", "--yes"]) == 1
+
+    # The handover itself still happens; what must not happen is a clean
+    # exit 0 while the previous holder's phone can still answer MFA prompts.
+    assert [call[0] for call in client.writes] == ["update_user", "revoke_sessions", "update_user"]
+    err = capsys.readouterr().err
+    assert "completed with issues" in err
+    assert "mfa not reset" in err and "UserAuthenticationMethod.ReadWrite.All" in err
+    assert "mfa not reset" in audit_text(tmp_path)
+
+
+def test_every_documented_method_type_is_removed_and_the_password_is_left(wire):
+    client = wire(FakeGraph(make_user(), methods=[PASSWORD, PHONE, QR_PIN]))
+
+    assert provision.main(["reuse", "--yes"]) == 0
+
+    deleted = [call[2] for call in client.writes if call[0] == "delete_auth_method"]
+    assert deleted == ["phoneMethods", "qrCodePinMethod"]
+
+
+def test_a_method_type_the_tool_cannot_remove_is_an_issue(wire, capsys):
+    client = wire(FakeGraph(make_user(), methods=[UNKNOWN]))
+
+    assert provision.main(["reuse", "--yes"]) == 1
+
+    assert not [call for call in client.writes if call[0] == "delete_auth_method"]
+    captured = capsys.readouterr()
+    assert "mfa method future left in place" in captured.out
+    assert "no registered mfa methods to remove" in captured.out
+    assert "completed with issues" in captured.err
+
+
+def test_a_failed_method_delete_is_an_issue_but_the_rest_continue(wire, capsys):
+    class FlakyGraph(FakeGraph):
+        def delete_auth_method(self, user_id, method_path, method_id):
+            super().delete_auth_method(user_id, method_path, method_id)
+            if method_id == "m-phone":
+                raise GraphError("Graph API error (500) — boom", status=500)
+
+    client = wire(FlakyGraph(make_user(), methods=[PHONE, AUTHENTICATOR]))
+
+    assert provision.main(["reuse", "--yes"]) == 1
+
+    deleted = [call[3] for call in client.writes if call[0] == "delete_auth_method"]
+    assert deleted == ["m-phone", "m-app"]
+    assert "could not remove mfa method phone" in capsys.readouterr().err

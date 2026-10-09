@@ -258,3 +258,37 @@ def test_remove_group_member_targets_the_membership_reference():
 
     method, url, _, _ = client.session.requests[0]
     assert (method, url) == ("DELETE", f"{GRAPH_BASE}/groups/group-1/members/user-1/$ref")
+
+
+# --- MFA method deletion ------------------------------------------------------
+
+def test_auth_method_delete_hits_the_typed_endpoint():
+    client = make_client([FakeResponse(204)])
+
+    client.delete_auth_method("user-1", "phoneMethods", "m-1")
+
+    method, url, _, _ = client.session.requests[0]
+    assert (method, url) == ("DELETE", f"{GRAPH_BASE}/users/user-1/authentication/phoneMethods/m-1")
+
+
+def test_qr_code_pin_is_a_singleton_without_an_id():
+    client = make_client([FakeResponse(204)])
+
+    client.delete_auth_method("user-1", "qrCodePinMethod", "ignored")
+
+    _, url, _, _ = client.session.requests[0]
+    assert url == f"{GRAPH_BASE}/users/user-1/authentication/qrCodePinMethod"
+
+
+def test_every_v1_method_type_except_password_has_a_delete_path():
+    documented = {
+        "emailAuthenticationMethod", "externalAuthenticationMethod",
+        "fido2AuthenticationMethod", "microsoftAuthenticatorAuthenticationMethod",
+        "phoneAuthenticationMethod", "platformCredentialAuthenticationMethod",
+        "qrCodePinAuthenticationMethod", "softwareOathAuthenticationMethod",
+        "temporaryAccessPassAuthenticationMethod",
+        "windowsHelloForBusinessAuthenticationMethod",
+    }
+    mapped = {key.split(".")[-1] for key in graph_api.AUTH_METHOD_PATHS}
+    assert mapped == documented
+    assert "passwordAuthenticationMethod" not in mapped
