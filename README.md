@@ -389,26 +389,51 @@ platforms:
 The test suite exercises the tool's decision logic against in-memory fakes,
 so it needs no credentials, no `.env`, and no tenant, and makes zero network
 calls — so it's safe to run on any machine, including one whose `.env` points
-at production. It covers three areas:
+at production. One file per area:
 
 - **Offboarding** (`tests/test_terminate.py`): a recording fake of the Graph
   client asserts the *order* of operations — disable and revoke sessions
-  first, then memberships, then licenses. It also checks that a preview or
-  `--dry-run` writes nothing, that only Graph-managed groups are removed
-  (distribution lists come back as paste-ready commands, dynamic groups are
-  left alone), that one failed group removal doesn't stop the rest, and that
-  a failed `--convert-shared` leaves the licenses in place.
+  first (each logged as it lands), then memberships, then licenses. It also
+  checks that a preview or `--dry-run` writes nothing, that only
+  Graph-managed groups are removed (distribution lists come back as
+  paste-ready commands and count as open follow-ups, dynamic groups are left
+  alone, directory roles are reported), that only directly assigned licenses
+  are removed, that one failed step doesn't stop the rest, and that a failed
+  `--convert-shared` leaves the licenses in place.
+- **Role-account handover** (`tests/test_reuse.py`): the exact write order —
+  password reset, session revocation, MFA wipe, and only then the rename and
+  enable; the `--yes` preview, the `--force` guard against enabled or
+  non-role targets, zero writes under `--dry-run`, no further writes after a
+  refused password reset, every MFA method type, licenses already held, and
+  the memberships inherited from the previous holder.
+- **Account creation** (`tests/test_new.py`): the create payload, an explicit
+  `--upn` that is taken, the duplicate-UPN error, the guard against
+  re-running a half-finished `new`, and the dry run.
+- **Lookup** (`tests/test_discover.py`): who holds a role account, the
+  last-sign-in column and its fallback when sign-in activity isn't readable.
 - **The Graph client** (`tests/test_graph_client.py`): a scripted fake of
   `requests.Session` covers token caching and early refresh, `Retry-After`
-  and backoff on 429/503/504, the directory-concurrency retry, giving up
-  after three attempts, error-message extraction, and `@odata.nextLink`
-  paging.
+  (seconds or HTTP date, capped) and backoff, the directory-concurrency
+  retry, dropped connections, creates that are never blindly resent, error
+  codes, paging on every list call, MFA method deletion, address-collision
+  queries, large-attachment upload sessions, the delegated device-code
+  sign-in and its token cache, and `.env` taking precedence over the shell.
 - **Distribution list joins** (`tests/test_distribution_lists.py`): a fake
   of the Exchange session checks the PowerShell the tool generates — every
-  value stays inside its single-quoted string even with an apostrophe in a
-  list address — plus the joined, failed, and session-never-ran outcomes.
+  value stays inside its single-quoted string even with an apostrophe or a
+  typographic quote in a list address — plus the joined, failed,
+  session-never-ran and no-PowerShell outcomes.
 - **UPN generation** (`tests/test_upn_generation.py`): the collision-safe
-  username ladder.
+  username ladder, aliases and group addresses counting as taken, and the
+  transliteration of names NFKD can't reduce.
+- **The login-info email** (`tests/test_email.py`): the example template,
+  the clipboard's CF_HTML framing, the Outlook draft and its attachments,
+  and the dry run.
+- **hire.yaml** (`tests/test_hire.py`): YAML 1.1 surprises (`No` as a
+  surname, `050` as a number) and the required-field checks.
+- **The rules** (`tests/test_rules.py`): property numbers and joined pairs,
+  display names and titles, the three-source group merge, license chains and
+  seat fallback, and `provision_extras` applying them.
 
 From the repo root, with the venv activated:
 
