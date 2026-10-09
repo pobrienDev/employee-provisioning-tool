@@ -217,7 +217,9 @@ number to `corporate_property`), and job-title groups (case-insensitive
 match under `groups.titles`). Each join is reported by group name, an
 already-present membership counts as fine, and duplicates across sources
 collapse. Transient Graph throttling and
-concurrency errors are retried automatically.
+concurrency errors are retried automatically — except that the account
+creation itself is never resent after a gateway timeout, since the first
+attempt may have gone through; the run stops and says so instead.
 
 Classic Exchange distribution lists are the exception: their membership is
 read-only through the Graph API. By default the run prints their joins as

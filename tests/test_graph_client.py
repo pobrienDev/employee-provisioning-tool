@@ -383,3 +383,43 @@ def test_sign_out_removes_both_cache_locations(token_paths):
     assert set(removed) == {str(new), str(legacy)}
     assert not new.exists() and not legacy.exists()
     assert forget_sign_in() == []
+
+
+# --- creates are never blindly retried ----------------------------------------
+
+def test_create_user_is_not_retried_after_a_gateway_timeout(sleeps):
+    client = make_client([FakeResponse(504, text="gateway timeout")])
+
+    with pytest.raises(GraphError, match="may already have been applied") as excinfo:
+        client.create_user({"userPrincipalName": "t@x"})
+
+    assert excinfo.value.status == 504
+    assert len(client.session.requests) == 1
+    assert sleeps == []
+
+
+def test_create_user_still_retries_throttling(sleeps):
+    client = make_client([
+        FakeResponse(429, headers={"Retry-After": "1"}),
+        FakeResponse(201, {"id": "u1"}),
+    ])
+
+    assert client.create_user({"userPrincipalName": "t@x"}) == {"id": "u1"}
+    assert len(client.session.requests) == 2
+
+
+def test_create_draft_is_not_retried_after_an_outage(sleeps):
+    client = make_client([FakeResponse(503)])
+
+    with pytest.raises(GraphError):
+        client.create_draft({"subject": "x"})
+
+    assert len(client.session.requests) == 1
+
+
+def test_idempotent_writes_still_retry_outages(sleeps):
+    client = make_client([FakeResponse(503), FakeResponse(204)])
+
+    client.update_user("user-1", {"jobTitle": "Manager"})
+
+    assert len(client.session.requests) == 2

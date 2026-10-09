@@ -158,11 +158,17 @@ class GraphClient:
         self._token_expires = time.time() + int(payload.get("expires_in", 3600)) - 60
         return self._token
 
-    def _request(self, method, path, **kwargs):
+    def _request(self, method, path, idempotent=True, **kwargs):
         """Send an authenticated request to Graph and return the response.
 
         `path` is either a path under the v1.0 base ("/users") or a full URL
         (as returned in @odata.nextLink paging links).
+
+        Throttling and outage responses are retried, except that a request
+        which is not idempotent (creating a user, creating a draft) is never
+        resent after a 503/504: the gateway may have timed out *after* the
+        directory applied the create, and a blind retry would then fail on
+        "already exists" with no sign that the first attempt went through.
         """
         url = path if path.startswith("https://") else f"{GRAPH_BASE}{path}"
         headers = kwargs.pop("headers", {})
@@ -174,7 +180,7 @@ class GraphClient:
                 )
             except requests.RequestException as exc:
                 raise GraphError(f"{method} {url} failed: {exc}") from exc
-            if attempt < 2 and self._transient(response):
+            if attempt < 2 and self._transient(response, idempotent):
                 try:
                     delay = int(response.headers.get("Retry-After", ""))
                 except ValueError:
@@ -183,14 +189,28 @@ class GraphClient:
                 continue
             break
         if response.status_code >= 400:
-            raise GraphError(self._error_message(response), status=response.status_code)
+            message = self._error_message(response)
+            if not idempotent and response.status_code in (503, 504):
+                message += (
+                    " — not retried: the request may already have been applied, "
+                    "so check before running it again"
+                )
+            raise GraphError(message, status=response.status_code)
         return response
 
     @staticmethod
-    def _transient(response):
-        """True for throttling/outage responses Graph tells clients to retry."""
-        if response.status_code in (429, 503, 504):
+    def _transient(response, idempotent=True):
+        """True for throttling/outage responses Graph tells clients to retry.
+
+        A 429 means the request was not processed, and a concurrency
+        conflict means the write was rejected, so both are always safe to
+        resend. A 503/504 is ambiguous — the request may have gone through
+        — so only idempotent requests retry on those.
+        """
+        if response.status_code == 429:
             return True
+        if response.status_code in (503, 504):
+            return idempotent
         # Rapid writes to the same directory object can collide transiently.
         return (
             response.status_code == 409
@@ -209,7 +229,7 @@ class GraphClient:
 
     def create_draft(self, payload):
         """Create a draft message in the signed-in mailbox (delegated only)."""
-        return self._request("POST", "/me/messages", json=payload).json()
+        return self._request("POST", "/me/messages", idempotent=False, json=payload).json()
 
     def add_attachment(self, message_id, payload):
         """Attach a file to a draft message (delegated only)."""
@@ -267,8 +287,13 @@ class GraphClient:
             raise
 
     def create_user(self, payload):
-        """Create a user and return the new account object."""
-        return self._request("POST", "/users", json=payload).json()
+        """Create a user and return the new account object.
+
+        Not retried on 503/504 (see _request): a second POST after a create
+        that actually went through would leave an account whose temporary
+        password was never shown to anyone.
+        """
+        return self._request("POST", "/users", idempotent=False, json=payload).json()
 
     def update_user(self, user_id, changes):
         """PATCH attributes on an existing user."""
