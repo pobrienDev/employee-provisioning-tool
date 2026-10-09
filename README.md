@@ -174,7 +174,14 @@ passwords and personal contact details never go in the log.
 automatically tries two letters of the first name, then three, and so on
 (numbered variants as a last resort), reporting each taken address and who
 holds it. An explicit `--upn` is never substituted — if it's taken, the run
-stops. The account is created with a temporary must-change password. `reuse` locks the departed
+stops. The account is created with a temporary must-change password. If a
+`new` run is interrupted after the account exists (a network drop between
+the create and the license step, say), **don't run `new` again** — the UPN
+ladder would step past the half-made account and create a second one. `new`
+guards against this by stopping when an account with the hire's exact name
+was created in the last week; finish the hire with `reuse --upn <that upn>
+--yes --force` instead, which resets the password, assigns the license and
+groups, and prints the email draft exactly as `new` would have. `reuse` locks the departed
 employee out first — password reset, then session revocation — then wipes
 their registered MFA methods so the new hire enrolls their own, before
 renaming and re-enabling the account. Like `terminate`, it changes nothing

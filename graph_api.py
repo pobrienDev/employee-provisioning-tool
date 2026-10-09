@@ -276,6 +276,16 @@ class GraphClient:
         }
         return self._request("GET", "/users", params=params).json()["value"]
 
+    def find_users_by_name(self, given_name, surname, select):
+        """Users whose givenName and surname both match exactly."""
+        given = given_name.replace("'", "''")
+        family = surname.replace("'", "''")
+        params = {
+            "$filter": f"givenName eq '{given}' and surname eq '{family}'",
+            "$select": select,
+        }
+        return self._request("GET", "/users", params=params).json()["value"]
+
     def get_user(self, upn_or_id, select):
         """Return one user, or None if no such account exists."""
         try:

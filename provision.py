@@ -32,7 +32,7 @@ import subprocess
 import sys
 import tempfile
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
@@ -325,6 +325,41 @@ def display_name_for(hire, config):
     if at_property and hire.get("title") and hire.get("property_name"):
         return f"{display_title(hire, config)} at {hire['property_name']}"
     return f"{hire['first_name']} {hire['last_name']}"
+
+
+RECENT_CREATE_WINDOW = timedelta(days=7)
+
+
+def recent_account_for(client, hire):
+    """An account created in the last week with the hire's exact name, or
+    None.
+
+    If a `new` run stopped after create_user succeeded, re-running it
+    would find the first UPN taken, step to the next rung of the ladder
+    and create a *second* account (and a second license seat) for the same
+    person. The way to finish a half-done hire is `reuse --upn` on the
+    account that already exists, so this check stops `new` and points
+    there.
+    """
+    try:
+        matches = client.find_users_by_name(
+            hire["first_name"], hire["last_name"],
+            "id,userPrincipalName,displayName,createdDateTime,accountEnabled",
+        )
+    except GraphError:
+        return None   # the name check is a safety net, not a gate
+    cutoff = datetime.now(timezone.utc) - RECENT_CREATE_WINDOW
+    for user in matches:
+        created = user.get("createdDateTime")
+        if not created:
+            continue
+        try:
+            when = datetime.fromisoformat(created.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if when >= cutoff:
+            return user
+    return None
 
 
 def pick_upn(client, hire, config):
@@ -1023,6 +1058,18 @@ def cmd_new(args):
             print_user(existing)
             raise ProvisionError("that UPN is taken — pick another with --upn")
     else:
+        existing = recent_account_for(client, hire)
+        if existing:
+            when = (existing.get("createdDateTime") or "").replace("T", " ")[:16]
+            local = (existing.get("userPrincipalName") or "").split("@", 1)[0]
+            raise ProvisionError(
+                f"an account for {hire['first_name']} {hire['last_name']} was "
+                f"created {when} UTC: {existing.get('userPrincipalName')}. If an "
+                "earlier run of new was interrupted, finish it with: "
+                f"python provision.py reuse --upn {local} --yes --force "
+                "(same name, so the rename is a no-op). If this is a different "
+                "person, pass --upn to create another account."
+            )
         upn = pick_upn(client, hire, config)
     audit(f"new: {upn}{' (dry-run)' if dry else ''}")
 
@@ -1060,9 +1107,10 @@ def cmd_new(args):
                 # The pre-check can miss an account created seconds ago — the
                 # directory lags a little before new UPNs are readable.
                 raise ProvisionError(
-                    f"{upn} already exists — if it was just created, the directory "
-                    "can lag a few seconds; re-run to see it, or pick another UPN "
-                    "with --upn"
+                    f"{upn} already exists — if an earlier run just created it, "
+                    "finish that account with: python provision.py reuse --upn "
+                    f"{upn.split('@', 1)[0]} --yes --force; otherwise pick another "
+                    "UPN with --upn"
                 ) from exc
             raise
         act(f"created {display_name} ({created.get('userPrincipalName', upn)})")
