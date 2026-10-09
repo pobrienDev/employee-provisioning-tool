@@ -118,3 +118,37 @@ def test_print_user_without_holder_or_office_stays_one_line(capsys):
     out = capsys.readouterr().out
     assert out.count("\n") == 1
     assert "held by" not in out
+
+
+# --- last sign-in covers more than interactive sign-ins -----------------------------
+
+def test_a_phone_mail_app_refreshing_tokens_counts_as_recent_use():
+    user = {"signInActivity": {
+        "lastSignInDateTime": "2026-03-01T08:00:00Z",              # last typed-in sign-in
+        "lastNonInteractiveSignInDateTime": "2026-10-08T06:30:00Z",  # Outlook mobile, this week
+    }}
+    assert provision.last_sign_in(user) == "2026-10-08T06:30:00Z (non-interactive)"
+
+
+def test_the_last_successful_sign_in_wins_when_it_is_the_latest():
+    user = {"signInActivity": {
+        "lastSignInDateTime": "2026-10-01T08:00:00Z",
+        "lastSuccessfulSignInDateTime": "2026-10-09T08:00:00Z",
+    }}
+    assert provision.last_sign_in(user) == "2026-10-09T08:00:00Z (successful)"
+
+
+def test_no_activity_at_all_is_none():
+    assert provision.last_sign_in({}) is None
+    assert provision.last_sign_in({"signInActivity": {"lastSignInDateTime": None}}) is None
+
+
+def test_discover_prints_the_kind_of_sign_in(wire, capsys):
+    wire(FakeGraph([role_account(signInActivity={
+        "lastSignInDateTime": "2026-01-01T00:00:00Z",
+        "lastNonInteractiveSignInDateTime": "2026-10-07T12:00:00Z",
+    })]))
+
+    provision.main(["discover", "619"])
+
+    assert "last sign-in: 2026-10-07T12:00:00Z (non-interactive)" in capsys.readouterr().out

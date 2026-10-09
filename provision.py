@@ -227,9 +227,28 @@ def get_user_with_sign_in(client, upn, fields=USER_FIELDS):
         return client.get_user(upn, fields)
 
 
+SIGN_IN_KINDS = (
+    ("lastSuccessfulSignInDateTime", "successful"),
+    ("lastSignInDateTime", "interactive"),
+    ("lastNonInteractiveSignInDateTime", "non-interactive"),
+)
+
+
 def last_sign_in(user):
-    """The account's last interactive sign-in time, or None."""
-    return (user.get("signInActivity") or {}).get("lastSignInDateTime")
+    """The account's most recent sign-in from signInActivity, as text, or None.
+
+    lastSignInDateTime counts interactive sign-ins only. A role account
+    used every day through the Outlook mobile app refreshes its tokens
+    without one and would look abandoned — and the reuse-or-new decision
+    turns on this column — so the latest of the interactive,
+    non-interactive and last-successful stamps is shown, with its kind.
+    """
+    activity = user.get("signInActivity") or {}
+    stamps = [(activity[key], kind) for key, kind in SIGN_IN_KINDS if activity.get(key)]
+    if not stamps:
+        return None
+    when, kind = max(stamps)   # ISO-8601 UTC stamps order chronologically as text
+    return f"{when} ({kind})"
 
 
 def role_number(local, config):
@@ -1232,8 +1251,7 @@ def cmd_discover(args):
             matches = client.find_users(prefix, USER_FIELDS)
         for user in matches:
             found = True
-            last = (user.get("signInActivity") or {}).get("lastSignInDateTime")
-            print_user(user, last)
+            print_user(user, last_sign_in(user))
 
     if not found:
         print(f"No accounts found for: {', '.join(prefixes)}")

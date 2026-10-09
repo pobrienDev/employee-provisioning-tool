@@ -132,8 +132,12 @@ Optional permissions unlock extras:
   only; an account holding an admin role needs Privileged Authentication
   Administrator, which the tool deliberately doesn't ask for. Without
   either piece, `reuse` stops cleanly before changing anything.
-- `AuditLog.Read.All` (plus an Entra ID P1 license) — lets `discover` show
-  last sign-in times; without it the column is skipped.
+- `AuditLog.Read.All` (plus an Entra ID P1 license) — lets `discover` and
+  the `reuse` preview show when an account was last used: the most recent
+  of its interactive, non-interactive (a phone's mail app refreshing a
+  token) and last-successful sign-ins, labelled with which it was, so a
+  role account in daily use on a phone doesn't look abandoned. Without the
+  permission the column is skipped.
 - `LicenseAssignment.Read.All` — lets `skus` list the tenant's license SKUs
   and their IDs, and lets rule-based `licensing` check free seats live (the
   reference's least-privileged permission for `subscribedSkus`;
