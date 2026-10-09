@@ -209,3 +209,79 @@ def test_dry_run_touches_neither_the_clipboard_nor_outlook(draft_env, monkeypatc
     assert "(generated at the real run)" in out   # the printed rehearsal still shows the shape
     assert "[dry-run] would copy the body" in out
     assert "[dry-run] would create the Outlook draft" in out
+
+
+# --- the clipboard's CF_HTML framing -----------------------------------------------------
+
+def test_cf_html_offsets_are_byte_offsets_into_the_utf8_payload():
+    fragment = "<div>Grüße — https://outlook.office.com</div>"   # multi-byte characters on purpose
+    blob = provision.cf_html(fragment)
+
+    header, _, _ = blob.partition(b"<html>")
+    fields = dict(line.split(b":", 1) for line in header.strip().split(b"\r\n"))
+    assert fields[b"Version"] == b"0.9"
+    start_html, end_html = int(fields[b"StartHTML"]), int(fields[b"EndHTML"])
+    start_frag, end_frag = int(fields[b"StartFragment"]), int(fields[b"EndFragment"])
+    assert blob[start_html:].startswith(b"<html><body><!--StartFragment-->")
+    assert blob[start_frag:end_frag] == fragment.encode("utf-8")
+    assert blob[end_frag:].startswith(b"<!--EndFragment--></body></html>")
+    assert end_html == len(blob)
+
+
+def test_cf_html_header_fields_are_ten_digits_so_their_width_never_shifts():
+    blob = provision.cf_html("x")
+    assert b"StartHTML:0000000" in blob and b"EndFragment:0000000" in blob
+
+
+# --- the HTML body -------------------------------------------------------------------------
+
+def test_draft_body_html_escapes_markup_links_urls_and_keeps_line_breaks():
+    body = "Hi <you> & co\nLink: https://outlook.office.com/x?a=1&b=2 end"
+
+    html_out = provision.draft_body_html(body)
+
+    assert html_out.startswith('<div style="font-family:Calibri')
+    assert "&lt;you&gt; &amp; co<br>" in html_out
+    assert '<a href="https://outlook.office.com/x?a=1&amp;b=2">https://outlook.office.com/x?a=1&amp;b=2</a> end' in html_out
+    assert "<script" not in provision.draft_body_html("<script>alert(1)</script>")
+
+
+def test_body_inner_html_unwraps_a_document_or_passes_a_fragment_through():
+    assert provision.body_inner_html('<html><body class="x">inner <b>bits</b></body></html>') == 'inner <b>bits</b>'
+    assert provision.body_inner_html("<p>already a fragment</p>") == "<p>already a fragment</p>"
+
+
+# --- the captured signature ----------------------------------------------------------------
+
+def test_load_signature_is_empty_until_capture_signature_has_run(monkeypatch, tmp_path):
+    monkeypatch.setattr(provision, "SIGNATURE_DIR", tmp_path / "signature")
+    assert provision.load_signature() == (None, [])
+
+
+def test_load_signature_returns_the_fragment_and_only_the_images_that_exist(monkeypatch, tmp_path):
+    folder = tmp_path / "signature"
+    folder.mkdir()
+    (folder / "signature.html").write_text("<html><body><p>Pat</p><img src=\"cid:logo\"></body></html>", encoding="utf-8")
+    (folder / "00_logo.png").write_bytes(b"png")
+    (folder / "meta.json").write_text(
+        '[{"file": "00_logo.png", "name": "logo.png", "contentType": "image/png", "contentId": "logo", "isInline": true},'
+        ' {"file": "01_gone.png", "name": "gone.png", "contentId": "gone"}]',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(provision, "SIGNATURE_DIR", folder)
+
+    fragment, attachments = provision.load_signature()
+
+    assert fragment == '<p>Pat</p><img src="cid:logo">'
+    assert [a["contentId"] for a in attachments] == ["logo"]
+    assert attachments[0]["path"] == folder / "00_logo.png"
+
+
+def test_a_corrupt_meta_json_just_means_no_images(monkeypatch, tmp_path):
+    folder = tmp_path / "signature"
+    folder.mkdir()
+    (folder / "signature.html").write_text("<p>Pat</p>", encoding="utf-8")
+    (folder / "meta.json").write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(provision, "SIGNATURE_DIR", folder)
+
+    assert provision.load_signature() == ("<p>Pat</p>", [])
