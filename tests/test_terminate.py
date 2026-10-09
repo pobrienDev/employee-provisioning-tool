@@ -351,3 +351,16 @@ def test_failed_conversion_keeps_the_licenses(wire, monkeypatch, capsys):
         ("revoke_sessions", USER_ID),
     ]
     assert "licenses kept" in capsys.readouterr().err
+
+
+# --- which tenant -------------------------------------------------------------
+
+def test_every_write_command_announces_its_tenant_first(wire, capsys, tmp_path):
+    client = wire(FakeGraph(make_user(), []))
+    client.tenant_id = "tenant-1"
+
+    provision.main(["terminate", "manager619", "--dry-run"])
+
+    out = capsys.readouterr().out
+    assert out.index("tenant: tenant-1 (example.com)") < out.index("Terminating:")
+    assert "tenant: tenant-1 (example.com)" in audit_text(tmp_path)

@@ -21,7 +21,10 @@ one reviewed command.
 
 - **App-only auth (client credentials) at the core:** the tool authenticates
   as an Entra ID app registration, so it can only ever touch the tenant
-  configured in `.env`. Plain `requests` against the REST API; no SDK.
+  configured in `.env` — the file next to the script wins over any variable
+  still exported in the shell, and every write command prints the tenant ID
+  and domain it is about to touch before doing anything. Plain `requests`
+  against the REST API; no SDK.
   The exceptions are deliberate and opt-in: steps the Graph application
   model can't or shouldn't do (Exchange distribution lists, mailbox
   conversion, drafts in the operator's own mailbox) run as the *signed-in

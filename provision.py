@@ -216,6 +216,15 @@ def tenant_domain(config, required=True):
     return domain
 
 
+def announce_tenant(client, config):
+    """Say which tenant a write command is about to touch — the app's
+    tenant from .env and the domain from config.yaml — before anything
+    happens, so a swapped .env or a stale shell variable can't go unseen."""
+    tenant_id = getattr(client, "tenant_id", None) or "?"
+    domain = tenant_domain(config, required=False)
+    act(f"tenant: {tenant_id}" + (f" ({domain})" if domain else ""))
+
+
 def sanitize_local(text):
     """Reduce a name fragment to the ASCII letters/digits a UPN allows."""
     ascii_text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
@@ -993,6 +1002,7 @@ def cmd_new(args):
     hire = enrich_from_property(load_hire(), config)
     client = GraphClient.from_env()
     dry = args.dry_run
+    announce_tenant(client, config)
     if args.upn:
         # An explicit UPN is a decision, not a starting point — never
         # silently substitute a different one for it.
@@ -1068,6 +1078,7 @@ def cmd_reuse(args):
     hire = enrich_from_property(load_hire(), config)
     client = GraphClient.from_env()
     dry = args.dry_run
+    announce_tenant(client, config)
 
     target = args.upn or hire.get("reuse_upn")
     if not target:
@@ -1417,6 +1428,7 @@ def cmd_terminate(args):
     config = load_config()
     client = GraphClient.from_env()
     dry = args.dry_run
+    announce_tenant(client, config)
     domain = tenant_domain(config, required=False)
     upn = args.upn if "@" in args.upn or not domain else f"{args.upn}@{domain}"
     audit(f"terminate: {upn}{' (dry-run)' if dry else ''}")

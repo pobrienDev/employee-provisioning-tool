@@ -126,7 +126,7 @@ def test_rejected_credentials_raise_graph_error():
 
 
 def test_from_env_names_the_missing_settings(monkeypatch):
-    monkeypatch.setattr(graph_api, "load_dotenv", lambda: None)   # ignore any real .env
+    monkeypatch.setattr(graph_api, "load_dotenv", lambda *a, **k: None)   # ignore any real .env
     monkeypatch.setenv("TENANT_ID", "t")
     monkeypatch.delenv("CLIENT_ID", raising=False)
     monkeypatch.delenv("CLIENT_SECRET", raising=False)
@@ -310,3 +310,25 @@ def test_member_roles_keeps_only_directory_roles():
     assert [role["id"] for role in roles] == ["role"]
     _, url, _, _ = client.session.requests[0]
     assert url == f"{GRAPH_BASE}/users/user-1/memberOf?$select=id,displayName"
+
+
+def test_env_file_next_to_the_module_wins_over_the_shell(monkeypatch, tmp_path):
+    """A TENANT_ID left exported from an earlier session must not redirect
+    a run away from the tenant .env names."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("TENANT_ID=from-file\nCLIENT_ID=c\nCLIENT_SECRET=s\n", encoding="utf-8")
+    monkeypatch.setattr(graph_api, "ENV_FILE", env_file)
+    monkeypatch.setenv("TENANT_ID", "from-shell")
+
+    client = GraphClient.from_env()
+
+    assert client.tenant_id == "from-file"
+
+
+def test_without_an_env_file_the_environment_is_used(monkeypatch, tmp_path):
+    monkeypatch.setattr(graph_api, "ENV_FILE", tmp_path / "missing.env")
+    monkeypatch.setenv("TENANT_ID", "t")
+    monkeypatch.setenv("CLIENT_ID", "c")
+    monkeypatch.setenv("CLIENT_SECRET", "s")
+
+    assert GraphClient.from_env().tenant_id == "t"

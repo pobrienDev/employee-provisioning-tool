@@ -30,6 +30,12 @@ DEVICE_CODE_URL = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/device
 DELEGATED_SCOPE = "https://graph.microsoft.com/Mail.ReadWrite offline_access"
 TOKEN_CACHE = Path(__file__).parent / ".token_cache.json"
 
+# Credentials come from the .env next to this module. It is loaded with
+# override=True: a TENANT_ID still exported in the shell from some earlier
+# session must not quietly redirect a run to a different tenant than the
+# file says. Without a .env, the process environment is used as-is.
+ENV_FILE = Path(__file__).parent / ".env"
+
 # Registered MFA method types -> the per-type endpoint used to delete them:
 # every authenticationMethod type in the Graph v1.0 reference except
 # passwordAuthenticationMethod, which can't be deleted, only reset.
@@ -77,10 +83,11 @@ class GraphClient:
     def from_env(cls):
         """Build a client from TENANT_ID, CLIENT_ID, and CLIENT_SECRET.
 
-        Values come from the process environment, with .env loaded first
-        if one exists next to the script.
+        Values come from the .env next to this module when it exists (and
+        win over anything already in the process environment), otherwise
+        from the process environment.
         """
-        load_dotenv()
+        load_dotenv(ENV_FILE, override=True)
         required = ("TENANT_ID", "CLIENT_ID", "CLIENT_SECRET")
         missing = [name for name in required if not os.getenv(name)]
         if missing:
@@ -339,7 +346,7 @@ class DelegatedGraphClient(GraphClient):
     @classmethod
     def from_env(cls):
         """Build a delegated client from TENANT_ID and CLIENT_ID."""
-        load_dotenv()
+        load_dotenv(ENV_FILE, override=True)
         missing = [name for name in ("TENANT_ID", "CLIENT_ID") if not os.getenv(name)]
         if missing:
             raise ConfigError(
