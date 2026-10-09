@@ -86,7 +86,8 @@ one reviewed command.
    the group lookups in `new`/`reuse` come back 403, add `Group.Read.All`
    as well. Under *Certificates & secrets*, create a client secret.
 
-2. **Python environment:**
+2. **Python environment** — Python 3.10 or newer (the pinned dependencies
+   need 3.10; CI runs the suite on 3.10 and 3.12, on Ubuntu and Windows):
 
    ```
    python3 -m venv venv              # Windows: python -m venv venv
@@ -421,4 +422,5 @@ import path, which is what an IDE's test runner uses). Without activating,
 call the venv's interpreter directly:
 `venv/bin/python -m pytest -q` on macOS/Linux, `venv\Scripts\python -m pytest -q`
 on Windows. GitHub Actions runs the same command on every push and pull
-request (`.github/workflows/tests.yml`, Python 3.12).
+request (`.github/workflows/tests.yml`) on Python 3.10 and 3.12, on Ubuntu
+and Windows.
