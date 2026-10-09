@@ -175,7 +175,11 @@ name is on it, enabled or disabled, last sign-in) and the plan. Because a
 mistyped UPN would lock a working employee out, it also refuses — unless
 `--force` is given — when the target is still enabled, when its UPN isn't a
 configured role prefix (`naming.roles`), or when the role account belongs to
-a different property than `hire.yaml` names.
+a different property than `hire.yaml` names. Because `reuse` only ever adds
+memberships, it ends by listing every group the account still holds that
+`config.yaml` doesn't map to the hire's title or property — memberships
+inherited from the previous holder, kept for you to review — and reports
+any inherited directory role as an issue.
 
 Either path stamps the hire's details onto the account's contact fields:
 title → Job title, property name → Office, property number → Department —

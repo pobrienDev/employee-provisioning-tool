@@ -48,12 +48,15 @@ class FakeGraph:
         "assign_license", "add_group_member",
     }
 
-    def __init__(self, user=None, methods=(), deny_password=False, deny_methods=False, skus=()):
+    def __init__(self, user=None, methods=(), deny_password=False, deny_methods=False,
+                 skus=(), groups=(), roles=()):
         self.user = user
         self.methods = list(methods)
         self.deny_password = deny_password
         self.deny_methods = deny_methods
         self.skus = list(skus)
+        self.groups = list(groups)
+        self.roles = list(roles)
         self.calls = []
 
     @property
@@ -94,6 +97,14 @@ class FakeGraph:
 
     def add_group_member(self, group_id, user_id):
         self.calls.append(("add_group_member", group_id, user_id))
+
+    def get_member_groups(self, user_id):
+        self.calls.append(("get_member_groups", user_id))
+        return list(self.groups)
+
+    def get_member_roles(self, user_id):
+        self.calls.append(("get_member_roles", user_id))
+        return list(self.roles)
 
 
 def make_user(enabled=False):
@@ -305,3 +316,44 @@ def test_a_failed_method_delete_is_an_issue_but_the_rest_continue(wire, capsys):
     deleted = [call[3] for call in client.writes if call[0] == "delete_auth_method"]
     assert deleted == ["m-phone", "m-app"]
     assert "could not remove mfa method phone" in capsys.readouterr().err
+
+
+# --- what the previous holder leaves behind ------------------------------------
+
+MANAGERS = {"id": "g-mgrs", "displayName": "Site Managers", "groupTypes": [], "mailEnabled": False}
+MAINTENANCE = {"id": "g-maint", "displayName": "Maintenance", "groupTypes": [], "mailEnabled": False}
+ALL_STAFF_DL = {
+    "id": "g-dl", "displayName": "All Staff", "groupTypes": [],
+    "mailEnabled": True, "mail": "allstaff@example.com",
+}
+
+
+def test_memberships_outside_the_hire_mapping_are_listed_for_review(wire, monkeypatch, capsys, tmp_path):
+    config = dict(CONFIG, groups={"titles": {"Property Manager": ["g-mgrs"]}})
+    monkeypatch.setattr(provision, "load_config", lambda: config)
+    client = wire(FakeGraph(make_user(), groups=[MANAGERS, MAINTENANCE, ALL_STAFF_DL]))
+
+    def found_group(group_id, select="displayName"):
+        client.calls.append(("get_group", group_id))
+        return {"id": group_id, "displayName": "Site Managers", "groupTypes": [], "mailEnabled": False}
+
+    client.get_group = found_group
+
+    assert provision.main(["reuse", "--yes"]) == 0
+
+    out = capsys.readouterr().out
+    assert "review — 2 membership(s) kept from the previous holder" in out
+    assert "still a member of Maintenance (remove in the admin center" in out
+    assert "still a member of All Staff (distribution list" in out
+    assert "still a member of Site Managers" not in out
+    # Listed, never removed: some of them may be intended.
+    assert not [call for call in client.calls if call[0] == "remove_group_member"]
+    assert "still a member of Maintenance" in audit_text(tmp_path)
+
+
+def test_an_inherited_directory_role_is_an_issue(wire, capsys):
+    client = wire(FakeGraph(make_user(), roles=[{"id": "r-1", "displayName": "Groups Administrator"}]))
+
+    assert provision.main(["reuse", "--yes"]) == 1
+
+    assert "directory role Groups Administrator inherited from the previous holder" in capsys.readouterr().err

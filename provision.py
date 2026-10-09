@@ -609,6 +609,52 @@ def reset_mfa(client, user_id, dry):
     return issues
 
 
+def review_memberships(client, user_id, hire, config):
+    """List what a reused account still carries beyond the hire's groups.
+
+    reuse only ever adds memberships, so whatever the previous holder had —
+    groups tied to another title, anything added by hand for that person,
+    directory roles — would otherwise pass silently to the new hire. Every
+    group outside groups_for() is printed for review (kept, since some may
+    be intended), and an inherited directory role counts as an issue.
+    Returns the issues.
+    """
+    expected = set(groups_for(hire, config))
+    try:
+        groups = client.get_member_groups(user_id)
+        roles = client.get_member_roles(user_id)
+    except GraphError as exc:
+        msg = f"could not review the account's existing memberships — {exc}"
+        act(msg)
+        return [msg]
+
+    extras = [g for g in groups if g.get("id") not in expected]
+    if extras:
+        act(
+            f"review — {len(extras)} membership(s) kept from the previous holder "
+            "that config.yaml doesn't map to this title or property:"
+        )
+        for group in extras:
+            label = group.get("displayName") or group.get("id")
+            kind = group_kind(group)
+            how = {
+                "exchange": "distribution list — Remove-DistributionGroupMember in Exchange Online PowerShell",
+                "dynamic": "dynamic group — membership follows attributes",
+            }.get(kind, "remove in the admin center if the new hire shouldn't have it")
+            act(f"  still a member of {label} ({how})")
+    issues = []
+    for role in roles:
+        label = role.get("displayName") or role.get("id")
+        msg = (
+            f"directory role {label} inherited from the previous holder — remove it "
+            "in the Entra admin center (Roles and administrators) unless the new "
+            "hire needs it"
+        )
+        act(msg)
+        issues.append(msg)
+    return issues
+
+
 def role_alias_note(client, hire, config, upn):
     """Suggest a personal email alias for role-format accounts.
 
@@ -1110,6 +1156,7 @@ def cmd_reuse(args):
     issues += provision_extras(
         client, config, hire, user["id"], dry, upn=upn, join_dls=args.join_dls
     )
+    issues += review_memberships(client, user["id"], hire, config)
     role_alias_note(client, hire, config, upn)
     checklist(hire)
     email_draft(
