@@ -4,9 +4,9 @@ A Python command-line tool that automates employee onboarding and offboarding
 in Microsoft Entra ID through the Microsoft Graph API. It turns a Formstack
 "Employee Status Change" submission — which arrives as a Zendesk ticket —
 into account creation (or role-account reuse), license assignment, group
-membership, and credential delivery, and turns a termination into a clean,
-complete offboarding — with a dry-run mode and an audit log of every action
-taken.
+membership, and credential delivery, and turns a termination into a
+lockout-first offboarding of the account, its Graph-managed memberships and
+its licenses — with a dry-run mode and an audit log of every action taken.
 
 ```
 Formstack form (via Zendesk ticket)  →  hire.yaml  →  provision.py  →  Graph API  →  Entra ID
@@ -227,7 +227,14 @@ print as paste-ready `Remove-DistributionGroupMember` commands (Graph can't
 touch them), and dynamic groups are noted and skipped since their
 membership follows attributes. With `--convert-shared`, **every membership
 is kept** — a shared mailbox usually exists so that group and list mail
-keeps arriving. Without
+keeps arriving. What it covers is exactly that: the account, its
+Graph-managed group memberships and its licenses. Anything it can't finish
+itself is reported as an open follow-up and the run exits 1 until it's done:
+the printed distribution-list removals, and any **directory role** the
+account holds (removing roles would need `RoleManagement.ReadWrite.Directory`,
+which the app deliberately doesn't carry, so they're handed to the admin
+center's Roles and administrators page). Registered devices, app ownership,
+OneDrive hand-off and mail forwarding are outside the tool. Without
 `--yes` it only prints who would be offboarded and what would happen — the
 destructive path always requires the flag. Converting the mailbox to shared
 (if mail must be retained) is printed as a manual follow-up by default, since

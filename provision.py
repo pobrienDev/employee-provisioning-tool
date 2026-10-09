@@ -1382,6 +1382,7 @@ def cmd_terminate(args):
         )
 
     groups = client.get_member_groups(user["id"])
+    roles = client.get_member_roles(user["id"])
     licenses = [lic["skuId"] for lic in user.get("assignedLicenses") or []]
     # A shared mailbox usually exists so that mail keeps arriving — its
     # group and distribution-list memberships stay put.
@@ -1394,6 +1395,9 @@ def cmd_terminate(args):
         return group.get("displayName") or group["id"]
 
     def exchange_notes():
+        """Memberships the tool can't end itself. Returns the follow-ups
+        still open afterwards, so the run can exit 1 until they're done."""
+        open_items = []
         for group in dynamic:
             act(f"{label(group)} is a dynamic group — membership follows attributes, nothing to remove")
         if exchange:
@@ -1408,6 +1412,22 @@ def cmd_terminate(args):
                     f"    Remove-DistributionGroupMember -Identity '{identity}' "
                     f"-Member '{member}' -Confirm:$false  # {label(group)}"
                 )
+            open_items.append(
+                f"{len(exchange)} distribution list removal(s) still to paste into "
+                "Exchange Online PowerShell"
+            )
+        for role in roles:
+            # Roles outlive a disable: a re-enabled or reused account would
+            # hold them again. Removing them needs a permission the app
+            # deliberately lacks, so they are handed to the admin center.
+            msg = (
+                f"directory role {label(role)} stays assigned — remove it in the "
+                "Entra admin center (Roles and administrators); this tool holds "
+                "no role-management permission"
+            )
+            act(msg)
+            open_items.append(msg)
+        return open_items
 
     print("Terminating:")
     print_user(user)
@@ -1437,6 +1457,8 @@ def cmd_terminate(args):
         group_plan = f"remove {len(removable)} group membership(s)"
         if exchange:
             group_plan += f" (+{len(exchange)} distribution list(s) as paste-ready commands)"
+    if roles:
+        group_plan += f", {len(roles)} directory role(s) to remove by hand"
     print(
         f"  plan: disable account, revoke sessions,"
         f"{' convert the mailbox to shared,' if args.convert_shared else ''} "
@@ -1472,7 +1494,7 @@ def cmd_terminate(args):
             msg = f"could not remove from {label(group)}: {exc}"
             act(msg)
             issues.append(msg)
-    exchange_notes()
+    issues += exchange_notes()
 
     if not licenses:
         act("no licenses to remove")

@@ -40,14 +40,16 @@ class FakeGraph:
       .writes    just the calls that would change the tenant
       fail_group a group id whose removal raises GraphError, to exercise
                  the keep-going-and-report path
+      roles      directory roles get_member_roles hands back
     """
 
     WRITES = {"update_user", "revoke_sessions", "remove_group_member", "remove_licenses"}
 
-    def __init__(self, user=None, groups=(), fail_group=None):
+    def __init__(self, user=None, groups=(), fail_group=None, roles=()):
         self.user = user
         self.groups = list(groups)
         self.fail_group = fail_group
+        self.roles = list(roles)
         self.calls = []
 
     @property
@@ -61,6 +63,10 @@ class FakeGraph:
     def get_member_groups(self, user_id):
         self.calls.append(("get_member_groups", user_id))
         return list(self.groups)
+
+    def get_member_roles(self, user_id):
+        self.calls.append(("get_member_roles", user_id))
+        return list(self.roles)
 
     def update_user(self, user_id, changes):
         self.calls.append(("update_user", user_id, changes))
@@ -182,18 +188,50 @@ def test_offboarding_locks_out_before_any_cleanup(wire):
 def test_only_graph_managed_groups_are_removed(wire, capsys):
     client = wire(FakeGraph(make_user(), [STAFF, TEAM, ALL_STAFF_DL, DYNAMIC]))
 
-    assert provision.main(["terminate", "manager619", "--yes"]) == 0
+    # Exit 1: the distribution list removal is still open after the run.
+    assert provision.main(["terminate", "manager619", "--yes"]) == 1
 
     removed = [call[1] for call in client.writes if call[0] == "remove_group_member"]
     assert removed == ["g-staff", "g-team"]
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
     # The distribution list comes back as a paste-ready Exchange command...
     assert (
         "Remove-DistributionGroupMember -Identity 'allstaff@example.com' "
         f"-Member '{UPN}' -Confirm:$false"
-    ) in out
+    ) in captured.out
+    # ...counted as work that remains, not as a finished offboarding...
+    assert "1 distribution list removal(s) still to paste" in captured.err
     # ...and the dynamic group is explained rather than touched.
-    assert "All Licensed Users is a dynamic group" in out
+    assert "All Licensed Users is a dynamic group" in captured.out
+
+
+def test_directory_roles_are_reported_as_open_follow_ups(wire, capsys, tmp_path):
+    client = wire(FakeGraph(
+        make_user(), [STAFF], roles=[{"id": "role-1", "displayName": "User Administrator"}],
+    ))
+
+    assert provision.main(["terminate", "manager619", "--yes"]) == 1
+
+    # The lockout and the group removal still happen; the role is not
+    # touched (the app holds no role permission) but it is never silent —
+    # a reused account would hand that role to the next hire.
+    assert [call[0] for call in client.writes] == [
+        "update_user", "revoke_sessions", "remove_group_member", "remove_licenses",
+    ]
+    captured = capsys.readouterr()
+    assert "1 directory role(s) to remove by hand" in captured.out
+    assert "directory role User Administrator stays assigned" in captured.err
+    assert "directory role User Administrator stays assigned" in audit_text(tmp_path)
+
+
+def test_dry_run_lists_directory_roles_too(wire, capsys):
+    client = wire(FakeGraph(make_user(), [], roles=[{"id": "role-1", "displayName": None}]))
+
+    assert provision.main(["terminate", "manager619", "--dry-run"]) == 0
+
+    assert client.writes == []
+    # Without a role-reading permission Graph returns only the id.
+    assert "directory role role-1 stays assigned" in capsys.readouterr().out
 
 
 def test_account_without_licenses_skips_license_removal(wire, capsys):
@@ -285,7 +323,10 @@ def test_convert_shared_keeps_memberships_and_converts_before_unlicensing(wire, 
 
     assert provision.main(["terminate", "manager619", "--yes", "--convert-shared"]) == 0
 
-    steps = [call[0] for call in client.calls if call[0] != "get_user" and call[0] != "get_member_groups"]
+    steps = [
+        call[0] for call in client.calls
+        if call[0] in client.WRITES or call[0] == "convert_mailbox_shared"
+    ]
     # Lock out, convert while the mailbox is still licensed, then unlicense —
     # and no memberships are removed, so group and list mail keeps arriving.
     assert steps == ["update_user", "revoke_sessions", "convert_mailbox_shared", "remove_licenses"]

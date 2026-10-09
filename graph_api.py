@@ -268,22 +268,42 @@ class GraphClient:
         """Remove the user from a group."""
         self._request("DELETE", f"/groups/{group_id}/members/{user_id}/$ref")
 
+    def _member_of(self, user_id, select, odata_type):
+        """The user's direct memberships of one directoryObject type.
+
+        memberOf returns groups, directory roles and administrative units
+        together; callers ask for the kind they can act on.
+        """
+        found = []
+        url = f"/users/{user_id}/memberOf?$select={select}"
+        while url:
+            page = self._request("GET", url).json()
+            found.extend(
+                item for item in page.get("value", [])
+                if item.get("@odata.type") == odata_type
+            )
+            url = page.get("@odata.nextLink")
+        return found
+
     def get_member_groups(self, user_id):
         """Return the groups the user belongs to, with enough of each
         group's shape (types, mail settings) to tell how to leave it."""
-        groups = []
-        url = (
-            f"/users/{user_id}/memberOf"
-            "?$select=id,displayName,groupTypes,mailEnabled,securityEnabled,mail"
+        return self._member_of(
+            user_id,
+            "id,displayName,groupTypes,mailEnabled,securityEnabled,mail",
+            "#microsoft.graph.group",
         )
-        while url:
-            page = self._request("GET", url).json()
-            groups.extend(
-                item for item in page.get("value", [])
-                if item.get("@odata.type") == "#microsoft.graph.group"
-            )
-            url = page.get("@odata.nextLink")
-        return groups
+
+    def get_member_roles(self, user_id):
+        """Return the directory roles the user holds (id, displayName).
+
+        A role is a different kind of privilege than a group membership and
+        removing one needs RoleManagement.ReadWrite.Directory, which this
+        tool deliberately doesn't hold — so roles are reported, not removed.
+        Without a role-reading permission Graph still returns the role, but
+        with only its id.
+        """
+        return self._member_of(user_id, "id,displayName", "#microsoft.graph.directoryRole")
 
     def remove_licenses(self, user_id, sku_ids):
         """Remove license SKUs from the user."""

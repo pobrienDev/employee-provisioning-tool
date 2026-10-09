@@ -292,3 +292,21 @@ def test_every_v1_method_type_except_password_has_a_delete_path():
     mapped = {key.split(".")[-1] for key in graph_api.AUTH_METHOD_PATHS}
     assert mapped == documented
     assert "passwordAuthenticationMethod" not in mapped
+
+
+def test_member_roles_keeps_only_directory_roles():
+    client = make_client([
+        FakeResponse(200, {
+            "value": [
+                {"@odata.type": "#microsoft.graph.group", "id": "g1"},
+                {"@odata.type": "#microsoft.graph.directoryRole", "id": "role", "displayName": "User Administrator"},
+                {"@odata.type": "#microsoft.graph.administrativeUnit", "id": "au"},
+            ],
+        }),
+    ])
+
+    roles = client.get_member_roles("user-1")
+
+    assert [role["id"] for role in roles] == ["role"]
+    _, url, _, _ = client.session.requests[0]
+    assert url == f"{GRAPH_BASE}/users/user-1/memberOf?$select=id,displayName"
