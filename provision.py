@@ -1033,9 +1033,11 @@ def email_draft(hire, display_name, upn, password, config=None, open_draft=False
     print(rendered.rstrip())
     print("--- end draft ---")
 
-    # First template line is the subject; the clipboard gets just the body.
+    # First template line is the subject — with or without a "Subject:"
+    # label, which the example template carries for readability; the
+    # clipboard gets just the body.
     parts = rendered.rstrip().split("\n", 1)
-    subject = parts[0].strip()
+    subject = re.sub(r"^subject:\s*", "", parts[0].strip(), flags=re.IGNORECASE)
     body = parts[1].lstrip("\n") if len(parts) > 1 else parts[0]
     if copy_draft_to_clipboard(body):
         print(

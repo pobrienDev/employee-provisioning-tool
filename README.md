@@ -323,8 +323,9 @@ whenever your signature changes.
 The email wording is yours to edit: copy `email_template.example.txt` to
 `email_template.txt` (git-ignored, so it can carry company-specific text)
 and write what you like, using the placeholders `{name}`, `{first}`,
-`{last}`, `{username}`, and `{password}`. The first line is the subject;
-end the body at your sign-off and let the captured signature carry the rest.
+`{last}`, `{username}`, and `{password}`. The first line is the subject (a
+leading `Subject:` label, as in the example, is optional and stripped); end
+the body at your sign-off and let the captured signature carry the rest.
 
 `hire.yaml` (git-ignored) carries the current hire's details, copied from
 the Formstack ticket's fields — about 30 seconds of copying that replaces
