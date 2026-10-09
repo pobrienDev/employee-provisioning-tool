@@ -184,3 +184,43 @@ def test_results_file_is_cleaned_up(exchange):
     provision.join_distribution_lists(UPN, [PLAIN])
 
     assert not Path(fake.results_path).exists()
+
+
+# --- the session never starting is no different from a failed join ----------------
+
+GUID = "00000000-0000-0000-0000-000000000002"
+DL_GROUP = {
+    "id": GUID, "displayName": "All Staff", "groupTypes": [],
+    "mailEnabled": True, "securityEnabled": False, "mail": PLAIN[0],
+}
+
+
+class ClientWithOneList:
+    def list_skus(self):
+        return []
+
+    def get_group(self, group_id, select="displayName"):
+        return DL_GROUP if group_id == GUID else None
+
+
+@pytest.mark.parametrize("reason", [
+    "no PowerShell found — Exchange steps need it",
+    "Exchange Online PowerShell timed out — complete the sign-in prompt, or do the step manually in the admin center",
+])
+def test_when_the_exchange_session_cannot_run_the_paste_ready_commands_still_print(exchange, capsys, reason):
+    def cannot_run(body):
+        raise provision.ProvisionError(reason)
+
+    exchange(cannot_run)
+    config = {"groups": {"titles": {"Property Manager": [GUID]}}}
+
+    issues = provision.provision_extras(
+        ClientWithOneList(), config, {"title": "Property Manager"}, "user-1",
+        dry=False, upn=UPN, join_dls=True,
+    )
+
+    assert issues == [reason]
+    out = capsys.readouterr().out
+    assert reason in out
+    # The README's promise: whatever went wrong, the hire can be finished by hand.
+    assert f"Add-DistributionGroupMember -Identity '{PLAIN[0]}' -Member '{UPN}'" in out

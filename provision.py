@@ -672,8 +672,11 @@ def provision_extras(client, config, hire, user_id, dry, upn=None, join_dls=Fals
                 try:
                     issues += join_distribution_lists(upn, pending_dls)
                 except ProvisionError as exc:
+                    # No PowerShell, or the session timed out: nothing was
+                    # joined, so the paste-ready commands are the fallback.
                     act(str(exc))
                     issues.append(str(exc))
+                    print_dl_joins(upn, pending_dls)
         else:
             # Paste-ready commands beat a per-run sign-in: connect once per
             # day, then each hire's joins are a two-second paste. (The
