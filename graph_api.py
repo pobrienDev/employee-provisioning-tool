@@ -15,6 +15,8 @@ import base64
 import json
 import os
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -109,6 +111,11 @@ class GraphError(Exception):
 class GraphClient:
     """App-only Microsoft Graph client with token caching."""
 
+    # How many times a request is attempted before its last answer is
+    # raised, and the longest a single Retry-After is honored for.
+    max_attempts = 3
+    max_retry_wait = 120
+
     def __init__(self, tenant_id, client_id, client_secret):
         self.tenant_id = tenant_id
         self.client_id = client_id
@@ -181,19 +188,21 @@ class GraphClient:
         url = path if path.startswith("https://") else f"{GRAPH_BASE}{path}"
         headers = kwargs.pop("headers", {})
         headers["Authorization"] = f"Bearer {self._get_token()}"
-        for attempt in range(3):
+        for attempt in range(self.max_attempts):
+            last = attempt == self.max_attempts - 1
             try:
                 response = self.session.request(
                     method, url, headers=headers, timeout=30, **kwargs
                 )
             except requests.RequestException as exc:
+                # A reset connection or read timeout mid-offboarding would
+                # otherwise stop the run; resend when a resend is harmless.
+                if idempotent and not last:
+                    time.sleep(self._retry_delay(None, attempt))
+                    continue
                 raise GraphError(f"{method} {url} failed: {exc}") from exc
-            if attempt < 2 and self._transient(response, idempotent):
-                try:
-                    delay = int(response.headers.get("Retry-After", ""))
-                except ValueError:
-                    delay = 2 * (attempt + 1)
-                time.sleep(max(delay, 1))
+            if not last and self._transient(response, idempotent):
+                time.sleep(self._retry_delay(response, attempt))
                 continue
             break
         if response.status_code >= 400:
@@ -205,6 +214,30 @@ class GraphClient:
                 )
             raise GraphError(message, status=response.status_code)
         return response
+
+    def _retry_delay(self, response, attempt):
+        """Seconds to wait before the next attempt.
+
+        Honors Retry-After as either a number of seconds or an HTTP date,
+        falls back to a short linear backoff, and caps the wait so a
+        far-future header can't hang the run.
+        """
+        header = (response.headers.get("Retry-After", "") if response is not None else "").strip()
+        delay = None
+        if header:
+            try:
+                delay = int(header)
+            except ValueError:
+                try:
+                    when = parsedate_to_datetime(header)
+                    if when.tzinfo is None:
+                        when = when.replace(tzinfo=timezone.utc)
+                    delay = (when - datetime.now(timezone.utc)).total_seconds()
+                except (TypeError, ValueError):
+                    delay = None
+        if delay is None:
+            delay = 2 * (attempt + 1)
+        return max(1, min(delay, self.max_retry_wait))
 
     @staticmethod
     def _transient(response, idempotent=True):

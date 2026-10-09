@@ -533,3 +533,93 @@ def test_a_rejected_range_is_a_graph_error():
 
     with pytest.raises(GraphError, match="upload of big.pdf failed"):
         client.add_file_attachment("m", "big.pdf", b"b" * ATTACHMENT_INLINE_LIMIT)
+
+
+# --- retry gaps: connection errors, HTTP-date Retry-After, the wait cap ------------
+
+import requests as _requests
+from email.utils import format_datetime
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+
+class FlakySession(FakeSession):
+    """Raises a connection error for the first `failures` Graph requests."""
+
+    def __init__(self, responses, failures):
+        super().__init__(responses)
+        self.failures = failures
+
+    def request(self, method, url, headers=None, timeout=None, **kwargs):
+        self.requests.append((method, url, dict(headers or {}), kwargs))
+        if self.failures:
+            self.failures -= 1
+            raise _requests.ConnectionError("connection reset by peer")
+        return self.responses.pop(0)
+
+
+def test_a_dropped_connection_is_retried_for_idempotent_requests(sleeps):
+    client = GraphClient("tenant-id", "client-id", "client-secret")
+    client.session = FlakySession([FakeResponse(200, {"value": []})], failures=1)
+
+    client.list_skus()
+
+    assert len(client.session.requests) == 2
+    assert sleeps == [2]
+
+
+def test_a_dropped_connection_is_not_retried_for_a_create(sleeps):
+    client = GraphClient("tenant-id", "client-id", "client-secret")
+    client.session = FlakySession([FakeResponse(201, {"id": "u"})], failures=1)
+
+    with pytest.raises(GraphError, match="connection reset"):
+        client.create_user({"userPrincipalName": "t@x"})
+
+    assert len(client.session.requests) == 1 and sleeps == []
+
+
+def test_a_connection_that_never_recovers_gives_up_after_max_attempts(sleeps):
+    client = GraphClient("tenant-id", "client-id", "client-secret")
+    client.session = FlakySession([], failures=99)
+
+    with pytest.raises(GraphError):
+        client.list_skus()
+
+    assert len(client.session.requests) == 3
+
+
+def test_retry_after_as_an_http_date_is_honored(sleeps):
+    when = _dt.now(_tz.utc) + _td(seconds=30)
+    client = make_client([
+        FakeResponse(429, headers={"Retry-After": format_datetime(when, usegmt=True)}),
+        FakeResponse(200, {"value": []}),
+    ])
+
+    client.list_skus()
+
+    assert len(sleeps) == 1 and 25 <= sleeps[0] <= 30
+
+
+def test_an_absurd_retry_after_is_capped(sleeps):
+    client = make_client([FakeResponse(429, headers={"Retry-After": "86400"}), FakeResponse(200, {"value": []})])
+
+    client.list_skus()
+
+    assert sleeps == [120]
+
+
+def test_an_unparseable_retry_after_falls_back_to_backoff(sleeps):
+    client = make_client([FakeResponse(429, headers={"Retry-After": "soon"}), FakeResponse(200, {"value": []})])
+
+    client.list_skus()
+
+    assert sleeps == [2]
+
+
+def test_attempt_count_is_configurable(sleeps):
+    client = make_client([FakeResponse(429, headers={"Retry-After": "1"})] * 5)
+    client.max_attempts = 5
+
+    with pytest.raises(GraphError):
+        client.list_skus()
+
+    assert len(client.session.requests) == 5
