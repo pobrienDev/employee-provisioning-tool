@@ -145,15 +145,19 @@ def test_dynamic_wins_over_mail_enabled():
 
 # --- preview and dry-run: nothing may change ---------------------------------
 
-def test_without_yes_nothing_is_written(wire, capsys):
+def test_without_yes_nothing_is_written(wire, capsys, tmp_path):
     client = wire(FakeGraph(make_user(), [STAFF, MANAGERS]))
 
-    assert provision.main(["terminate", "manager619"]) == 1
+    # A preview is the documented path, not an error: exit 0.
+    assert provision.main(["terminate", "manager619"]) == 0
 
     assert client.writes == []
     captured = capsys.readouterr()
     assert "plan: disable account, revoke sessions" in captured.out
-    assert "re-run with --yes" in captured.err
+    assert "re-run with --yes" in captured.out
+    assert captured.err == ""
+    log = audit_text(tmp_path)
+    assert "preview only" in log and "error" not in log
 
 
 def test_dry_run_writes_nothing_and_says_what_it_would_do(wire, capsys, tmp_path):

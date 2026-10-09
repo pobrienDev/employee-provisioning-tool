@@ -1883,7 +1883,11 @@ def cmd_terminate(args):
         + (f" ({len(inherited)} group-assigned follow the memberships)" if inherited else "")
     )
     if not args.yes:
-        raise ProvisionError("nothing done — re-run with --yes to offboard this account")
+        # The documented preview path, not a failure: exit 0 and no error
+        # line in the log, so a script or a reader can tell the two apart.
+        print("  nothing done — re-run with --yes to offboard this account")
+        audit("terminate: preview only, nothing changed")
+        return
 
     # Lock out first, then clean up — logging each write as it lands, so a
     # failed revocation can't hide the disable that already happened.
