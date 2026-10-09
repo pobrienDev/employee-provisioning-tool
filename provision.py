@@ -1316,12 +1316,14 @@ def cmd_new(args):
             when = (existing.get("createdDateTime") or "").replace("T", " ")[:16]
             local = (existing.get("userPrincipalName") or "").split("@", 1)[0]
             raise ProvisionError(
-                f"an account for {hire['first_name']} {hire['last_name']} was "
-                f"created {when} UTC: {existing.get('userPrincipalName')}. If an "
-                "earlier run of new was interrupted, finish it with: "
-                f"python provision.py reuse --upn {local} --yes --force "
-                "(same name, so the rename is a no-op). If this is a different "
-                "person, pass --upn to create another account."
+                f"an account for {hire['first_name']} {hire['last_name']} already "
+                f"exists, created {when} UTC: {existing.get('userPrincipalName')}. "
+                "If hire.yaml still holds the last hire you processed, update it "
+                "for the next one. If an earlier run of new was interrupted before "
+                "it finished, complete it with: python provision.py reuse --upn "
+                f"{local} --yes --force (same name, so the rename is a no-op). If "
+                "this is a different person with the same name, pass --upn to "
+                "create another account."
             )
         upn = pick_upn(client, hire, config)
     audit(f"new: {upn}{' (dry-run)' if dry else ''}")

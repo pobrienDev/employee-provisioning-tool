@@ -102,7 +102,9 @@ def test_a_recent_account_with_the_same_name_stops_new(wire, capsys):
 
     assert client.writes == []
     err = capsys.readouterr().err
-    assert f"an account for Taylor Example was created" in err
+    assert "an account for Taylor Example already exists" in err
+    # The usual way to hit this is a hire.yaml left over from the last hire.
+    assert "If hire.yaml still holds the last hire you processed" in err
     assert "reuse --upn texample --yes --force" in err
 
 
