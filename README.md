@@ -416,7 +416,9 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-Without activating, call the venv's interpreter directly:
+Plain `pytest -q` works too (`pyproject.toml` puts the repo root on the
+import path, which is what an IDE's test runner uses). Without activating,
+call the venv's interpreter directly:
 `venv/bin/python -m pytest -q` on macOS/Linux, `venv\Scripts\python -m pytest -q`
 on Windows. GitHub Actions runs the same command on every push and pull
 request (`.github/workflows/tests.yml`, Python 3.12).
