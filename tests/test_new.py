@@ -152,3 +152,70 @@ def test_dry_run_writes_nothing_and_rehearses_the_email(wire, monkeypatch, capsy
     assert "[dry-run] would create Property Manager at Elm Court (texample@example.com)" in capsys.readouterr().out
     # The draft step is told it is a rehearsal, so it can't sign in or write a draft.
     assert drafts and drafts[0]["dry"] is True and drafts[0]["open_draft"] is True
+
+
+# --- what a fresh account is created with ----------------------------------------
+
+def test_create_payload_carries_the_documented_fields(wire, capsys):
+    client = wire(FakeGraph())
+
+    assert provision.main(["new"]) == 0
+
+    (_, payload), = [call for call in client.writes if call[0] == "create_user"]
+    assert payload["accountEnabled"] is True
+    assert payload["userPrincipalName"] == f"texample@{DOMAIN}"
+    assert payload["mailNickname"] == "texample"
+    assert payload["displayName"] == "Property Manager at Elm Court"
+    assert (payload["givenName"], payload["surname"]) == ("Taylor", "Example")
+    assert payload["usageLocation"] == "US"
+    assert payload["passwordProfile"] == {"password": "Temp-Pass-1!", "forceChangePasswordNextSignIn": True}
+    # The contact fields the README promises: title, office, department.
+    assert payload["jobTitle"] == "Property Manager"
+    assert payload["officeLocation"] == "Elm Court"
+    assert payload["department"] == "619"
+    out = capsys.readouterr().out
+    assert f"created Property Manager at Elm Court (texample@{DOMAIN})" in out
+    assert "temp password: Temp-Pass-1!" in out
+
+
+def test_a_corporate_hire_keeps_a_personal_display_name(wire, monkeypatch):
+    monkeypatch.setattr(provision, "load_hire", lambda: dict(HIRE, property_number="50", property_name="Head Office"))
+    client = wire(FakeGraph())
+
+    provision.main(["new"])
+
+    (_, payload), = [call for call in client.writes if call[0] == "create_user"]
+    assert payload["displayName"] == "Taylor Example"
+    assert payload["department"] == "50"
+
+
+def test_a_taken_explicit_upn_stops_the_run_instead_of_being_replaced(wire, capsys):
+    client = wire(FakeGraph(existing={f"tsmith2@{DOMAIN}": "Tom Smith"}))
+
+    assert provision.main(["new", "--upn", "tsmith2"]) == 1
+
+    assert client.writes == []
+    captured = capsys.readouterr()
+    assert f"tsmith2@{DOMAIN} already exists" in captured.out
+    assert "that UPN is taken" in captured.err
+    # No ladder: an explicit UPN is a decision, not a starting point.
+    assert [call[1] for call in client.calls if call[0] == "get_user"] == [f"tsmith2@{DOMAIN}"]
+
+
+def test_an_explicit_bare_upn_gets_the_tenant_domain(wire):
+    client = wire(FakeGraph())
+
+    assert provision.main(["new", "--upn", "taylor.e"]) == 0
+
+    (_, payload), = [call for call in client.writes if call[0] == "create_user"]
+    assert payload["userPrincipalName"] == f"taylor.e@{DOMAIN}"
+    assert payload["mailNickname"] == "taylor.e"
+
+
+def test_the_temp_password_never_reaches_the_audit_log(wire, tmp_path):
+    wire(FakeGraph())
+
+    provision.main(["new"])
+
+    logs = list((tmp_path / "logs").glob("provision-*.log"))
+    assert logs and "Temp-Pass-1!" not in logs[0].read_text(encoding="utf-8")
