@@ -88,6 +88,17 @@ one reviewed command.
 
 3. **Credentials:** copy `.env.example` to `.env` and fill in the tenant ID,
    client (application) ID, and client secret from the app registration.
+   That secret is a tenant-wide credential: with the permissions above,
+   anyone who copies `.env` can create accounts, change group membership
+   and — with the optional password permission — reset non-admin passwords
+   from anywhere, with no MFA in the way. Treat it like a domain-admin
+   password: give it the shortest lifetime the admin center offers and put
+   the expiry in your calendar (the sandbox app in entra-terraform rotates
+   its secret every 180 days), keep `.env` out of OneDrive and other synced
+   folders and readable only by your own account, and replace the secret at
+   once if the machine is lost. Conditional Access for workload identities
+   (a separate add-on license) can additionally pin the app to the office
+   network.
 
 4. **Config:** copy `config.example.yaml` to `config.yaml` and fill in the
    tenant domain, the role-account prefixes used at your properties, the
