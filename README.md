@@ -354,15 +354,17 @@ the Formstack ticket's fields — about 30 seconds of copying that replaces
 the whole portal walk-through (until Phase 6 pulls them automatically):
 
 ```yaml
-first_name: Taylor
-last_name: Example
-title: Property Manager
-property_number: 619          # or a joined pair as the form writes it: "720/721"
+# Quote the text values: YAML would otherwise read a surname like No as
+# false, or a number like 050 as 40.
+first_name: "Taylor"
+last_name: "Example"
+title: "Property Manager"
+property_number: "619"        # or a joined pair as the form writes it: "720/721"
 # property_name is optional when config.yaml's property list has the number —
 # the tool fills it in from there (an explicit value here still wins)
-property_name: Example Apartments
+property_name: "Example Apartments"
 # reuse mode only — the role account being handed over:
-reuse_upn: manager619
+reuse_upn: "manager619"
 
 # where the login info goes, and whether to CC the RPM — leave rpm_email
 # blank and it fills in from the property's rpm: in config.yaml

@@ -101,12 +101,39 @@ def act(message):
     audit(message)
 
 
-def load_yaml(name, hint):
+class HireLoader(yaml.SafeLoader):
+    """SafeLoader minus the number types.
+
+    YAML 1.1, which PyYAML implements, turns an unquoted 050 into the
+    octal integer 40 and 1e3 into a float. Nothing in hire.yaml is a
+    number — a property number is a label — so numbers stay text here.
+    Booleans still resolve, because copy_rpm and the platforms map use
+    them; a name that YAML reads as a boolean ("No") is caught in
+    load_hire instead.
+    """
+
+
+HireLoader.yaml_implicit_resolvers = {
+    first: [
+        (tag, regexp) for tag, regexp in resolvers
+        if tag not in ("tag:yaml.org,2002:int", "tag:yaml.org,2002:float")
+    ]
+    for first, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+
+# hire.yaml fields that are always text, whatever YAML made of them.
+HIRE_TEXT_FIELDS = (
+    "first_name", "last_name", "title", "property_number", "property_name",
+    "reuse_upn", "login_info_email", "rpm_email",
+)
+
+
+def load_yaml(name, hint, loader=yaml.SafeLoader):
     path = BASE_DIR / name
     if not path.exists():
         raise ProvisionError(f"{name} not found — {hint}")
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        data = yaml.load(path.read_text(encoding="utf-8"), Loader=loader)
     except yaml.YAMLError as exc:
         raise ProvisionError(f"{name} is not valid YAML: {exc}") from exc
     if data is None:
@@ -124,14 +151,30 @@ def load_config():
 
 def load_hire():
     hire = load_yaml(
-        "hire.yaml", "create it with the fields from the hire form (see README)"
+        "hire.yaml", "create it with the fields from the hire form (see README)",
+        loader=HireLoader,
     )
-    missing = [field for field in ("first_name", "last_name") if not hire.get(field)]
+    cleaned = {}
+    for key, value in hire.items():
+        if key in HIRE_TEXT_FIELDS:
+            if isinstance(value, bool):
+                # YAML 1.1 reads an unquoted No, Yes, On or Off as a boolean —
+                # and "No" is a real surname.
+                raise ProvisionError(
+                    f"hire.yaml: {key} reads as a yes/no value — put it in quotes, "
+                    f'for example {key}: "{"Yes" if value else "No"}"'
+                )
+            if value is not None:
+                value = str(value)
+        # Stray whitespace from copy-paste would otherwise reach the account's
+        # attributes and defeat title matching.
+        cleaned[key] = value.strip() if isinstance(value, str) else value
+    # Checked after stripping, so a whitespace-only name can't slip through
+    # as "present" and become an empty givenName.
+    missing = [field for field in ("first_name", "last_name") if not cleaned.get(field)]
     if missing:
         raise ProvisionError(f"hire.yaml is missing {', '.join(missing)}")
-    # Stray whitespace from copy-paste would otherwise reach the account's
-    # attributes and defeat title matching.
-    return {k: v.strip() if isinstance(v, str) else v for k, v in hire.items()}
+    return cleaned
 
 
 def temp_password():
