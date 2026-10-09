@@ -1114,13 +1114,21 @@ def create_outlook_draft(to, cc, subject, body, attachments):
 
 
 def email_draft(hire, display_name, upn, password, config=None, open_draft=False, dry=False):
-    """Print a ready-to-paste login-info email. Shown once, never saved.
+    """Print the login-info email and put its body on the clipboard.
 
     The wording lives in email_template.txt (git-ignored, so it can carry
     company-specific text), falling back to the committed
     email_template.example.txt. Placeholders: {name}, {first}, {last},
-    {username}, {password}. With open_draft, a pre-filled Outlook compose
-    window (plus config.yaml's email_attachments) opens for a manual send.
+    {username}, {password}; the first line is the subject (an optional
+    "Subject:" label is stripped).
+
+    The password is printed once and this tool writes it to no file of its
+    own — but it travels with the draft. The body goes to the clipboard as
+    rich text, and with open_draft the whole email (recipients, subject,
+    body, config.yaml's email_attachments, the captured signature) is saved
+    through Graph into the operator's own Outlook Drafts folder — no compose
+    window opens — where it holds the password until it is sent or deleted.
+    A dry run prints the draft with a placeholder password and does neither.
     """
     to = hire.get("login_info_email")
     if not to:
