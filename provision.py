@@ -702,6 +702,27 @@ def provision_extras(client, config, hire, user_id, dry, upn=None, join_dls=Fals
     return issues
 
 
+# The single-quote characters PowerShell accepts as string delimiters: the
+# ASCII apostrophe and the typographic ones (U+2018 to U+201B), which it
+# treats as ordinary quotes. Any of them inside a literal must be doubled.
+PS_QUOTES = ("'", "\u2018", "\u2019", "\u201a", "\u201b")
+
+
+def ps_quote(value):
+    """Return value as a single-quoted PowerShell string literal.
+
+    Every value the tool hands to Exchange Online PowerShell — SMTP
+    addresses, UPNs, a temp-file path — goes through here, so nothing can
+    close the literal early and run as code. Inside '...' the only special
+    characters are the quote delimiters themselves, and a doubled quote
+    stays literal; the same rule covers the typographic quotes.
+    """
+    text = str(value)
+    for quote_char in PS_QUOTES:
+        text = text.replace(quote_char, quote_char * 2)
+    return f"'{text}'"
+
+
 def print_dl_joins(upn, dls):
     """Print paste-ready Add-DistributionGroupMember lines for an Exchange
     Online PowerShell window (Connect-ExchangeOnline once, reuse the session)."""
@@ -710,12 +731,11 @@ def print_dl_joins(upn, dls):
         "Exchange Online PowerShell window (Connect-ExchangeOnline once, then "
         "reuse the session)"
     )
-    member = (upn or "<upn>").replace("'", "''")
+    member = ps_quote(upn or "<upn>")
     for identity, label in dls:
-        quoted = str(identity).replace("'", "''")
         print(
-            f"    Add-DistributionGroupMember -Identity '{quoted}' "
-            f"-Member '{member}'  # {label}"
+            f"    Add-DistributionGroupMember -Identity {ps_quote(identity)} "
+            f"-Member {member}  # {label}"
         )
 
 
@@ -1478,10 +1498,10 @@ def convert_mailbox_shared(upn):
     mailbox and mail sent on its behalf land in its own Sent Items — so
     whoever inherits the shared mailbox keeps a complete record.
     """
-    quoted = upn.replace("'", "''")
+    quoted = ps_quote(upn)
     result = exchange_shell(
-        f"Set-Mailbox -Identity '{quoted}' -Type Shared -ErrorAction Stop; "
-        f"Set-Mailbox -Identity '{quoted}' -MessageCopyForSentAsEnabled $true "
+        f"Set-Mailbox -Identity {quoted} -Type Shared -ErrorAction Stop; "
+        f"Set-Mailbox -Identity {quoted} -MessageCopyForSentAsEnabled $true "
         "-MessageCopyForSendOnBehalfEnabled $true -ErrorAction Stop"
     )
     if result.returncode != 0:
@@ -1503,25 +1523,24 @@ def join_distribution_lists(upn, dls):
     output is left visible for the sign-in. Returns a list of issues; each
     outcome is reported through act().
     """
-    quoted_upn = upn.replace("'", "''")
+    quoted_upn = ps_quote(upn)
     handle, results_path = tempfile.mkstemp(prefix="provision-dls-", suffix=".txt")
     os.close(handle)
-    quoted_path = results_path.replace("'", "''")
+    quoted_path = ps_quote(results_path)
 
     def clause(gid):
-        # Every value lands inside a single-quoted PowerShell string, where
-        # the only special character is the apostrophe — legal in an SMTP
-        # address (o'brien-team@...), and doubled to stay literal. PowerShell
+        # Every value lands inside a single-quoted PowerShell string (see
+        # ps_quote): an apostrophe is legal in an SMTP address
+        # (o'brien-team@...) and is doubled to stay literal. PowerShell
         # un-doubles it when writing the results file, so the markers read
         # back below still carry the address exactly as configured.
-        quoted_gid = str(gid).replace("'", "''")
         return (
-            f"try {{ Add-DistributionGroupMember -Identity '{quoted_gid}' "
-            f"-Member '{quoted_upn}' -ErrorAction Stop; "
-            f"Add-Content -Path '{quoted_path}' -Value 'JOINED {quoted_gid}' }} "
+            f"try {{ Add-DistributionGroupMember -Identity {ps_quote(gid)} "
+            f"-Member {quoted_upn} -ErrorAction Stop; "
+            f"Add-Content -Path {quoted_path} -Value {ps_quote(f'JOINED {gid}')} }} "
             f"catch {{ if (\"$_\" -match 'already a member') "
-            f"{{ Add-Content -Path '{quoted_path}' -Value 'JOINED {quoted_gid}' }} else "
-            f"{{ Add-Content -Path '{quoted_path}' -Value ('FAILED {quoted_gid} ' + $_) }} }}"
+            f"{{ Add-Content -Path {quoted_path} -Value {ps_quote(f'JOINED {gid}')} }} else "
+            f"{{ Add-Content -Path {quoted_path} -Value ({ps_quote(f'FAILED {gid} ')} + $_) }} }}"
         )
 
     body = "; ".join(clause(gid) for gid, _ in dls)
@@ -1741,12 +1760,12 @@ def cmd_terminate(args):
                 f"{len(exchange)} distribution list removal(s) printed below — paste "
                 "into an Exchange Online PowerShell window (Connect-ExchangeOnline once)"
             )
-            member = upn.replace("'", "''")
+            member = ps_quote(upn)
             for group in exchange:
-                identity = str(group.get("mail") or group["id"]).replace("'", "''")
+                identity = ps_quote(group.get("mail") or group["id"])
                 print(
-                    f"    Remove-DistributionGroupMember -Identity '{identity}' "
-                    f"-Member '{member}' -Confirm:$false  # {label(group)}"
+                    f"    Remove-DistributionGroupMember -Identity {identity} "
+                    f"-Member {member} -Confirm:$false  # {label(group)}"
                 )
             open_items.append(
                 f"{len(exchange)} distribution list removal(s) still to paste into "

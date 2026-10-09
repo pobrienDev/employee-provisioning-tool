@@ -224,3 +224,50 @@ def test_when_the_exchange_session_cannot_run_the_paste_ready_commands_still_pri
     assert reason in out
     # The README's promise: whatever went wrong, the hire can be finished by hand.
     assert f"Add-DistributionGroupMember -Identity '{PLAIN[0]}' -Member '{UPN}'" in out
+
+
+# --- one quoting rule for every value, typographic quotes included --------------------
+
+CURLY = "\u2019"   # the right single quotation mark PowerShell also treats as a delimiter
+
+
+@pytest.mark.parametrize("raw, literal", [
+    ("plain@example.com", "'plain@example.com'"),
+    ("o'brien@example.com", "'o''brien@example.com'"),
+    (f"o{CURLY}brien@example.com", f"'o{CURLY}{CURLY}brien@example.com'"),
+    ("\u2018a\u201ab\u201bc", "'\u2018\u2018a\u201a\u201ab\u201b\u201bc'"),
+    (42, "'42'"),
+])
+def test_ps_quote_doubles_every_single_quote_powershell_recognizes(raw, literal):
+    assert provision.ps_quote(raw) == literal
+
+
+def test_a_typographic_apostrophe_in_a_list_address_stays_inside_its_string(exchange):
+    address = f"o{CURLY}brien-team@example.com"
+    fake = exchange(FakeExchange({address: "JOINED"}))
+
+    issues = provision.join_distribution_lists(UPN, [(address, "Team")])
+
+    assert issues == []
+    # Every curly quote in the script is doubled: none stands alone to end a literal.
+    assert re.search(f"(?<!{CURLY}){CURLY}(?!{CURLY})", fake.script) is None
+    assert f"-Identity 'o{CURLY}{CURLY}brien-team@example.com'" in fake.script
+
+
+def test_every_exchange_command_the_tool_prints_uses_the_shared_quoting(capsys, monkeypatch, tmp_path):
+    monkeypatch.setattr(provision, "LOG_DIR", tmp_path / "logs")
+    curly_upn = f"d{CURLY}angelo@example.com"
+
+    provision.print_dl_joins(curly_upn, [(f"o{CURLY}brien@example.com", "Team")])
+
+    out = capsys.readouterr().out
+    assert f"-Identity 'o{CURLY}{CURLY}brien@example.com' -Member 'd{CURLY}{CURLY}angelo@example.com'" in out
+
+
+def test_convert_shared_quotes_the_upn_the_same_way(exchange):
+    scripts = []
+    exchange(lambda body: scripts.append(body) or SimpleNamespace(returncode=0))
+
+    provision.convert_mailbox_shared(f"d{CURLY}angelo@example.com")
+
+    assert f"Set-Mailbox -Identity 'd{CURLY}{CURLY}angelo@example.com' -Type Shared" in scripts[0]
