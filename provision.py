@@ -56,6 +56,11 @@ USER_FIELDS = (
 )
 
 
+# Group IDs in config.yaml are Entra object IDs. Anything else (a name, a
+# truncated paste) would come back from Graph as a 400 rather than a 404.
+GUID_RE = re.compile(r"[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}")
+
+
 class ProvisionError(Exception):
     """A provisioning step can't proceed; the message says why."""
 
@@ -461,8 +466,9 @@ def choose_license(client, config, hire):
                 "license not assigned — checking seat availability needs the "
                 "LicenseAssignment.Read.All application permission (admin-consented)"
             )
-            return None, None, [], problem
-        raise
+        else:
+            problem = f"license not assigned — could not read the tenant's license SKUs: {exc}"
+        return None, None, [], problem
     by_key = {}
     for sku in skus:
         by_key[str(sku.get("skuId", "")).lower()] = sku
@@ -526,9 +532,20 @@ def provision_extras(client, config, hire, user_id, dry, upn=None, join_dls=Fals
 
     pending_dls = []
     for group_id in group_ids:
-        group = client.get_group(
-            group_id, "displayName,groupTypes,mailEnabled,securityEnabled,mail"
-        )
+        if not GUID_RE.fullmatch(str(group_id)):
+            msg = f"group {group_id} is not a group ID (expected a GUID) — check config.yaml"
+            act(msg)
+            issues.append(msg)
+            continue
+        try:
+            group = client.get_group(
+                group_id, "displayName,groupTypes,mailEnabled,securityEnabled,mail"
+            )
+        except GraphError as exc:
+            msg = f"could not look up group {group_id}: {exc}"
+            act(msg)
+            issues.append(msg)
+            continue
         if group is None:
             msg = f"group {group_id} not found — check config.yaml"
             act(msg)
@@ -620,7 +637,9 @@ def reset_mfa(client, user_id, dry):
             )
             act(msg)
             return [msg]
-        raise
+        msg = f"mfa not reset — could not read the account's authentication methods: {exc}"
+        act(msg)
+        return [msg]
 
     issues = []
     removable = [m for m in methods if m.get("@odata.type") in AUTH_METHOD_PATHS]

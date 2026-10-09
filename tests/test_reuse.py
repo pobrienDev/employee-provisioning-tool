@@ -41,6 +41,8 @@ class FakeGraph:
       deny_methods   list_auth_methods raises a 403, as it does when the
                      app lacks UserAuthenticationMethod.ReadWrite.All
       methods        the MFA methods list_auth_methods hands back
+      group_lookup   group id -> the group get_group returns, or an
+                     exception for it to raise; ids not listed are None
     """
 
     WRITES = {
@@ -49,7 +51,7 @@ class FakeGraph:
     }
 
     def __init__(self, user=None, methods=(), deny_password=False, deny_methods=False,
-                 skus=(), groups=(), roles=()):
+                 skus=(), groups=(), roles=(), group_lookup=None):
         self.user = user
         self.methods = list(methods)
         self.deny_password = deny_password
@@ -57,6 +59,7 @@ class FakeGraph:
         self.skus = list(skus)
         self.groups = list(groups)
         self.roles = list(roles)
+        self.group_lookup = dict(group_lookup or {})
         self.calls = []
 
     @property
@@ -93,7 +96,10 @@ class FakeGraph:
 
     def get_group(self, group_id, select="displayName"):
         self.calls.append(("get_group", group_id))
-        return None
+        answer = self.group_lookup.get(group_id)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
 
     def add_group_member(self, group_id, user_id):
         self.calls.append(("add_group_member", group_id, user_id))
@@ -320,7 +326,8 @@ def test_a_failed_method_delete_is_an_issue_but_the_rest_continue(wire, capsys):
 
 # --- what the previous holder leaves behind ------------------------------------
 
-MANAGERS = {"id": "g-mgrs", "displayName": "Site Managers", "groupTypes": [], "mailEnabled": False}
+MANAGERS_ID = "00000000-0000-0000-0000-00000000000a"
+MANAGERS = {"id": MANAGERS_ID, "displayName": "Site Managers", "groupTypes": [], "mailEnabled": False}
 MAINTENANCE = {"id": "g-maint", "displayName": "Maintenance", "groupTypes": [], "mailEnabled": False}
 ALL_STAFF_DL = {
     "id": "g-dl", "displayName": "All Staff", "groupTypes": [],
@@ -329,15 +336,12 @@ ALL_STAFF_DL = {
 
 
 def test_memberships_outside_the_hire_mapping_are_listed_for_review(wire, monkeypatch, capsys, tmp_path):
-    config = dict(CONFIG, groups={"titles": {"Property Manager": ["g-mgrs"]}})
+    config = dict(CONFIG, groups={"titles": {"Property Manager": [MANAGERS_ID]}})
     monkeypatch.setattr(provision, "load_config", lambda: config)
-    client = wire(FakeGraph(make_user(), groups=[MANAGERS, MAINTENANCE, ALL_STAFF_DL]))
-
-    def found_group(group_id, select="displayName"):
-        client.calls.append(("get_group", group_id))
-        return {"id": group_id, "displayName": "Site Managers", "groupTypes": [], "mailEnabled": False}
-
-    client.get_group = found_group
+    client = wire(FakeGraph(
+        make_user(), groups=[MANAGERS, MAINTENANCE, ALL_STAFF_DL],
+        group_lookup={MANAGERS_ID: MANAGERS},
+    ))
 
     assert provision.main(["reuse", "--yes"]) == 0
 
@@ -357,3 +361,70 @@ def test_an_inherited_directory_role_is_an_issue(wire, capsys):
     assert provision.main(["reuse", "--yes"]) == 1
 
     assert "directory role Groups Administrator inherited from the previous holder" in capsys.readouterr().err
+
+
+# --- one bad item must not abandon the rest ------------------------------------
+
+GOOD_ID = "00000000-0000-0000-0000-000000000005"
+OTHER_ID = "00000000-0000-0000-0000-000000000006"
+SITE_STAFF = {"id": GOOD_ID, "displayName": "Site Staff", "groupTypes": [], "mailEnabled": False}
+
+
+def with_groups(monkeypatch, *ids):
+    config = dict(CONFIG, groups={"titles": {"Property Manager": list(ids)}})
+    monkeypatch.setattr(provision, "load_config", lambda: config)
+
+
+def test_a_non_guid_group_id_in_config_is_reported_and_the_rest_still_join(wire, monkeypatch, capsys):
+    with_groups(monkeypatch, "Site Staff", GOOD_ID)
+    client = wire(FakeGraph(make_user(), group_lookup={GOOD_ID: SITE_STAFF}))
+
+    assert provision.main(["reuse", "--yes"]) == 1
+
+    assert ("add_group_member", GOOD_ID, USER_ID) in client.writes
+    assert not [call for call in client.calls if call[0] == "get_group" and call[1] == "Site Staff"]
+    assert "group Site Staff is not a group ID" in capsys.readouterr().err
+
+
+def test_a_group_lookup_error_is_an_issue_not_an_abort(wire, monkeypatch, capsys):
+    with_groups(monkeypatch, OTHER_ID, GOOD_ID)
+    bad = GraphError("Graph API error (400) — Request_BadRequest: Invalid object identifier", status=400)
+    client = wire(FakeGraph(make_user(), group_lookup={OTHER_ID: bad, GOOD_ID: SITE_STAFF}))
+
+    assert provision.main(["reuse", "--yes"]) == 1
+
+    assert ("add_group_member", GOOD_ID, USER_ID) in client.writes
+    err = capsys.readouterr().err
+    assert "completed with issues" in err
+    assert f"could not look up group {OTHER_ID}" in err
+
+
+def test_a_license_lookup_error_is_an_issue_and_groups_still_join(wire, monkeypatch, capsys):
+    config = dict(CONFIG, licensing={"default": ["SPB"]}, groups={"titles": {"Property Manager": [GOOD_ID]}})
+    monkeypatch.setattr(provision, "load_config", lambda: config)
+
+    class NoSkus(FakeGraph):
+        def list_skus(self):
+            raise GraphError("Graph API error (500) — InternalServerError", status=500)
+
+    client = wire(NoSkus(make_user(), group_lookup={GOOD_ID: SITE_STAFF}))
+
+    assert provision.main(["reuse", "--yes"]) == 1
+
+    assert ("add_group_member", GOOD_ID, USER_ID) in client.writes
+    assert "could not read the tenant's license SKUs" in capsys.readouterr().err
+
+
+def test_an_auth_method_lookup_error_is_an_issue_not_an_abort(wire, capsys):
+    class NoMethods(FakeGraph):
+        def list_auth_methods(self, user_id):
+            raise GraphError("Graph API error (500) — InternalServerError", status=500)
+
+    client = wire(NoMethods(make_user()))
+
+    assert provision.main(["reuse", "--yes"]) == 1
+
+    # The rename/enable still happened and the summary still printed.
+    assert client.writes[-1][2]["accountEnabled"] is True
+    err = capsys.readouterr().err
+    assert "could not read the account's authentication methods" in err
