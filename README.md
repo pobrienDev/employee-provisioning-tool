@@ -266,7 +266,7 @@ SMTP address — run `Connect-ExchangeOnline` once and keep the window open,
 and each hire's joins become a two-second paste (the admin center's Assign
 memberships panel works too). Or opt in with `--join-dls` (on `new` or
 `reuse`) and the tool opens the Exchange Online PowerShell session itself —
-like `--convert-shared`, that one step runs as *your* signed-in account,
+like `--convert-shared`, this runs as *your* signed-in account,
 needs the `ExchangeOnlineManagement` module plus an Exchange admin or
 recipient management role, and treats already-a-member as success. Either
 way, a just-created account can take a minute to become visible to Exchange —
@@ -294,8 +294,8 @@ mailbox type is an Exchange setting outside the Graph v1.0 API. Opt in with
 `--convert-shared` and the tool does it for you between lockout and license
 removal — by shelling out to Exchange Online PowerShell (`Set-Mailbox -Type
 Shared`, then turning on both "Manage sent items" copies so mail sent as or
-on behalf of the mailbox lands in its own Sent Items), the one step that
-runs as *your* signed-in account rather than the app registration. It needs the `ExchangeOnlineManagement` module
+on behalf of the mailbox lands in its own Sent Items), running as *your*
+signed-in account rather than the app registration. It needs the `ExchangeOnlineManagement` module
 (`Install-Module ExchangeOnlineManagement`) and an Exchange admin role, and
 `Connect-ExchangeOnline` prompts for sign-in mid-run. With PowerShell 7
 installed that's a device code printed in the terminal; with Windows
@@ -335,9 +335,12 @@ printed draft and clipboard copy still stand; if it is created but an
 attachment or signature image fails to upload, the run says "draft created
 but incomplete" and names what to add in Outlook.
 
-This is the tool's one delegated feature: it signs in as *you* (a
-device-code prompt, cached so it's occasional) and touches only your own
-mailbox — the app registration needs the **delegated** `Mail.ReadWrite`
+Four features run as *you* rather than as the app registration:
+`--join-dls`, `--convert-shared`, `--open-draft` and `capture-signature`.
+The first two borrow your Exchange role through PowerShell; the last two are
+the tool's delegated Graph features: they sign in as *you* (a device-code
+prompt, cached so it's occasional) and touch only your own mailbox — the
+app registration needs the **delegated** `Mail.ReadWrite`
 permission and "Allow public client flows" enabled, never the tenant-wide
 application version. Because Outlook only inserts signatures into mail
 composed in the client (and offers no API to read them), `capture-signature`

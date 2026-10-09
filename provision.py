@@ -1512,9 +1512,10 @@ def exchange_shell(body):
 
     Membership of classic distribution lists and mailbox type are Exchange
     settings the Graph API can't write, so those steps shell out to the
-    ExchangeOnlineManagement module — the only place the tool acts as the
-    signed-in operator rather than the app registration, and always behind
-    an opt-in flag. The operator needs an Exchange admin (or recipient
+    ExchangeOnlineManagement module — one of the two ways the tool acts as
+    the signed-in operator rather than the app registration (the other is
+    DelegatedGraphClient, for the mailbox features), and always behind an
+    opt-in flag. The operator needs an Exchange admin (or recipient
     management) role.
 
     Sign-in depends on which PowerShell is installed. PowerShell 7 gets the
