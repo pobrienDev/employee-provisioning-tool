@@ -661,3 +661,122 @@ def test_list_calls_read_past_the_first_page(call, path):
 
     assert [item["id"] for item in call(client)] == [1, 2]
     assert client.session.requests[1][1] == next_link
+
+
+# --- the delegated (sign-in-as-you) client ----------------------------------------------
+
+class FakeLogin:
+    """Scripted stand-in for the session's post(): answers in order, an
+    Exception entry is raised instead of returned."""
+
+    def __init__(self, answers):
+        self.answers = list(answers)
+        self.posts = []
+
+    def post(self, url, data=None, timeout=None):
+        self.posts.append((url, dict(data or {})))
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+@pytest.fixture
+def delegated(monkeypatch, tmp_path):
+    """A DelegatedGraphClient with an empty token cache in a temp dir."""
+    monkeypatch.setattr(graph_api, "TOKEN_CACHE", tmp_path / "cache.json")
+    monkeypatch.setattr(graph_api, "LEGACY_TOKEN_CACHE", tmp_path / "legacy.json")
+    client = DelegatedGraphClient("tenant-id", "client-id", None)
+    return client
+
+
+DEVICE_FLOW = FakeResponse(200, {"device_code": "dc-1", "message": "go to microsoft.com/devicelogin and enter ABC", "interval": 1, "expires_in": 900})
+
+
+def test_device_code_sign_in_polls_until_the_code_is_entered(delegated, sleeps, capsys):
+    delegated.session = FakeLogin([
+        DEVICE_FLOW,
+        FakeResponse(400, {"error": "authorization_pending"}),
+        FakeResponse(400, {"error": "slow_down"}),
+        FakeResponse(200, {"access_token": "tok", "expires_in": 3600, "refresh_token": "rt-1"}),
+    ])
+
+    assert delegated._get_token() == "tok"
+
+    assert "enter ABC" in capsys.readouterr().out
+    assert sleeps == [1, 1, 6]   # slow_down adds five seconds to the interval
+    url, data = delegated.session.posts[0]
+    assert url.endswith("/oauth2/v2.0/devicecode") and data["scope"] == graph_api.DELEGATED_SCOPE
+    assert delegated.session.posts[1][1]["device_code"] == "dc-1"
+    assert json.loads(graph_api.TOKEN_CACHE.read_text(encoding="utf-8")) == {"refresh_token": "rt-1"}
+
+
+def test_a_cached_refresh_token_skips_the_device_code_prompt(delegated, sleeps):
+    graph_api.TOKEN_CACHE.write_text('{"refresh_token": "rt-old"}', encoding="utf-8")
+    delegated.session = FakeLogin([
+        FakeResponse(200, {"access_token": "tok-2", "expires_in": 3600, "refresh_token": "rt-new"}),
+    ])
+
+    assert delegated._get_token() == "tok-2"
+
+    url, data = delegated.session.posts[0]
+    assert url.endswith("/oauth2/v2.0/token")
+    assert (data["grant_type"], data["refresh_token"]) == ("refresh_token", "rt-old")
+    assert len(delegated.session.posts) == 1 and sleeps == []
+    assert json.loads(graph_api.TOKEN_CACHE.read_text(encoding="utf-8")) == {"refresh_token": "rt-new"}
+
+
+def test_a_rejected_refresh_token_falls_back_to_the_device_code(delegated, sleeps):
+    graph_api.TOKEN_CACHE.write_text('{"refresh_token": "rt-expired"}', encoding="utf-8")
+    delegated.session = FakeLogin([
+        FakeResponse(400, {"error": "invalid_grant"}),
+        DEVICE_FLOW,
+        FakeResponse(200, {"access_token": "tok-3", "expires_in": 3600}),
+    ])
+
+    assert delegated._get_token() == "tok-3"
+    assert len(delegated.session.posts) == 3
+
+
+def test_public_client_flows_disabled_is_explained(delegated, sleeps):
+    delegated.session = FakeLogin([
+        DEVICE_FLOW,
+        FakeResponse(400, {"error": "invalid_request", "error_description": "AADSTS7000218: The request body must contain client_assertion or client_secret."}),
+    ])
+
+    with pytest.raises(GraphError, match="Allow public client flows"):
+        delegated._get_token()
+
+
+# --- every sign-in failure is a GraphError, never a traceback -------------------------
+
+def test_a_non_json_refresh_response_falls_back_instead_of_crashing(delegated, sleeps):
+    graph_api.TOKEN_CACHE.write_text('{"refresh_token": "rt"}', encoding="utf-8")
+    delegated.session = FakeLogin([
+        FakeResponse(200, text="<html>proxy error</html>"),
+        DEVICE_FLOW,
+        FakeResponse(200, {"access_token": "tok", "expires_in": 3600}),
+    ])
+
+    assert delegated._get_token() == "tok"
+
+
+def test_a_non_json_device_code_response_is_a_graph_error(delegated, sleeps):
+    delegated.session = FakeLogin([FakeResponse(200, text="<html>captive portal</html>")])
+
+    with pytest.raises(GraphError, match="sign-in could not start"):
+        delegated._get_token()
+
+
+def test_a_dropped_connection_while_polling_is_a_graph_error(delegated, sleeps):
+    delegated.session = FakeLogin([DEVICE_FLOW, _requests.ConnectionError("reset")])
+
+    with pytest.raises(GraphError, match="sign-in interrupted"):
+        delegated._get_token()
+
+
+def test_a_non_json_poll_response_is_a_graph_error(delegated, sleeps):
+    delegated.session = FakeLogin([DEVICE_FLOW, FakeResponse(502, text="Bad Gateway")])
+
+    with pytest.raises(GraphError, match="unexpected response"):
+        delegated._get_token()

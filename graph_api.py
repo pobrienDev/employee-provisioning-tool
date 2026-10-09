@@ -605,7 +605,10 @@ class DelegatedGraphClient(GraphClient):
             )
         except requests.RequestException as exc:
             raise GraphError(f"cannot reach login.microsoftonline.com: {exc}") from exc
-        payload = response.json()
+        try:
+            payload = response.json()
+        except ValueError:
+            return False   # a proxy's HTML error page, say: sign in afresh
         if "access_token" not in payload:
             return False
         self._store(payload)
@@ -624,22 +627,40 @@ class DelegatedGraphClient(GraphClient):
             raise GraphError(
                 f"sign-in could not start ({response.status_code}): {response.text}"
             )
-        flow = response.json()
+        try:
+            flow = response.json()
+            flow["device_code"], flow["message"]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise GraphError(
+                "sign-in could not start — unexpected response from "
+                "login.microsoftonline.com (a proxy or captive portal in the way?)"
+            ) from exc
         print(f"\n  {flow['message']}\n")
         interval = int(flow.get("interval", 5))
         deadline = time.time() + int(flow.get("expires_in", 900))
         while time.time() < deadline:
             time.sleep(interval)
-            response = self.session.post(
-                TOKEN_URL.format(tenant=self.tenant_id),
-                data={
-                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                    "client_id": self.client_id,
-                    "device_code": flow["device_code"],
-                },
-                timeout=30,
-            )
-            payload = response.json()
+            # Every failure here becomes a GraphError, the one kind the
+            # callers catch: a dropped connection or a non-JSON answer must
+            # end as a summary line, not a traceback after the account work.
+            try:
+                response = self.session.post(
+                    TOKEN_URL.format(tenant=self.tenant_id),
+                    data={
+                        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                        "client_id": self.client_id,
+                        "device_code": flow["device_code"],
+                    },
+                    timeout=30,
+                )
+            except requests.RequestException as exc:
+                raise GraphError(f"sign-in interrupted — cannot reach login.microsoftonline.com: {exc}") from exc
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise GraphError(
+                    "sign-in failed — unexpected response from login.microsoftonline.com"
+                ) from exc
             if "access_token" in payload:
                 self._store(payload)
                 return
