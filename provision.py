@@ -948,10 +948,7 @@ def cmd_reuse(args):
 
     display_name = display_name_for(hire, config)
     if dry:
-        act(
-            f"[dry-run] would reset the password, revoke sessions, rename to "
-            f"{display_name}, and enable the account"
-        )
+        act("[dry-run] would reset the password and revoke sessions")
         password = None
     else:
         # Lock the departed employee out first: new password, then kill
@@ -975,25 +972,31 @@ def cmd_reuse(args):
             raise
         client.revoke_sessions(user["id"])
 
-        changes = {
-            "accountEnabled": True,
-            "displayName": display_name,
-            "givenName": hire["first_name"],
-            "surname": hire["last_name"],
-            # assignLicense requires a usageLocation; older role accounts may lack one
-            "usageLocation": (config.get("tenant") or {}).get("usage_location", "US"),
-        }
-        if hire.get("title"):
-            changes["jobTitle"] = hire["title"]
-        if property_numbers(hire.get("property_number")):
-            changes["department"] = property_label(hire["property_number"])
-        client.update_user(user["id"], changes)
+    # Wipe the previous holder's MFA registrations while the account is
+    # still locked out — once it is enabled, any method still registered
+    # would answer the new hire's MFA prompts on the old holder's phone.
+    issues = reset_mfa(client, user["id"], dry)
 
+    changes = {
+        "accountEnabled": True,
+        "displayName": display_name,
+        "givenName": hire["first_name"],
+        "surname": hire["last_name"],
+        # assignLicense requires a usageLocation; older role accounts may lack one
+        "usageLocation": (config.get("tenant") or {}).get("usage_location", "US"),
+    }
+    if hire.get("title"):
+        changes["jobTitle"] = hire["title"]
+    if property_numbers(hire.get("property_number")):
+        changes["department"] = property_label(hire["property_number"])
+    if dry:
+        act(f"[dry-run] would rename to {display_name} and enable the account")
+    else:
+        client.update_user(user["id"], changes)
         act(f"now: {display_name} — password reset, sessions revoked, account enabled")
         print(f"  temp password: {password}  (must change at first sign-in)")
         print("  mailbox history stays with the role account.")
 
-    issues = reset_mfa(client, user["id"], dry)
     issues += provision_extras(
         client, config, hire, user["id"], dry, upn=upn, join_dls=args.join_dls
     )
