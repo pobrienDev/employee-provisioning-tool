@@ -1378,10 +1378,17 @@ def cmd_reuse(args):
     }
     if hire.get("title"):
         changes["jobTitle"] = hire["title"]
+    if hire.get("property_name"):
+        # Same stamp as new: a reused account may be moving to a renamed
+        # or joined property, so its old Office value must not linger.
+        changes["officeLocation"] = hire["property_name"]
     if property_numbers(hire.get("property_number")):
         changes["department"] = property_label(hire["property_number"])
     if dry:
-        act(f"[dry-run] would rename to {display_name} and enable the account")
+        act(
+            f"[dry-run] would rename to {display_name}, stamp title, office and "
+            "department, and enable the account"
+        )
     else:
         client.update_user(user["id"], changes)
         act(f"now: {display_name} — renamed and enabled")

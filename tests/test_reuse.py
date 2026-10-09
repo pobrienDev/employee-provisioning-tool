@@ -207,7 +207,7 @@ def test_dry_run_writes_nothing_and_says_what_it_would_do(wire, capsys):
     out = capsys.readouterr().out
     assert "[dry-run] would reset the password and revoke sessions" in out
     assert "[dry-run] would remove 2 registered mfa method(s)" in out
-    assert "[dry-run] would rename to Property Manager at Elm Court and enable the account" in out
+    assert "[dry-run] would rename to Property Manager at Elm Court, stamp title, office and department, and enable the account" in out
 
 
 def test_an_enabled_account_is_refused_without_force(wire, capsys):
@@ -522,3 +522,18 @@ def test_flat_license_sku_is_kept_when_already_held(wire, monkeypatch, capsys):
 
     assert not [call for call in client.writes if call[0] == "assign_license"]
     assert "license kept" in capsys.readouterr().out
+
+
+# --- the contact fields are stamped on either path ------------------------------
+
+def test_reuse_stamps_title_office_and_department_like_new(wire):
+    client = wire(FakeGraph(make_user()))
+
+    assert provision.main(["reuse", "--yes"]) == 0
+
+    changes = client.writes[-1][2]
+    assert changes["jobTitle"] == "Property Manager"
+    assert changes["officeLocation"] == "Elm Court"
+    assert changes["department"] == "619"
+    assert changes["givenName"] == "Taylor" and changes["surname"] == "Example"
+    assert changes["usageLocation"] == "US"
