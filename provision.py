@@ -20,10 +20,12 @@ never passwords or personal contact details.
 
 import argparse
 import base64
+import getpass
 import html
 import io
 import json
 import os
+import platform
 import re
 import secrets
 import shutil
@@ -66,16 +68,31 @@ class ProvisionError(Exception):
     """A provisioning step can't proceed; the message says why."""
 
 
+def operator_tag():
+    """Who is running the tool, as OS user @ machine, for the audit log."""
+    try:
+        user = getpass.getuser()
+    except Exception:   # no login name available (odd service contexts)
+        user = "?"
+    return f"{user}@{platform.node() or '?'}"
+
+
+OPERATOR = operator_tag()
+
+
 def audit(message):
     """Append a timestamped line to today's audit log.
 
     Actions only — passwords and personal contact details never go in.
+    Each line is tagged with the operator (OS user and machine), so the
+    log says who ran what; it is still a local text file, so Entra's own
+    audit log remains the authoritative record of what the app changed.
     """
     LOG_DIR.mkdir(exist_ok=True)
     now = datetime.now()
     path = LOG_DIR / f"provision-{now:%Y-%m-%d}.log"
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(f"{now:%Y-%m-%d %H:%M:%S}  {message}\n")
+        handle.write(f"{now:%Y-%m-%d %H:%M:%S}  [{OPERATOR}]  {message}\n")
 
 
 def act(message):

@@ -50,9 +50,14 @@ one reviewed command.
   tenant-specific IDs in a git-ignored `config.yaml` (the committed
   `config.example.yaml` documents the shape). The `.gitignore` was the
   repository's first commit.
-- **Personal data stays out of the repo and the logs:** per-hire input files
-  are git-ignored, and the audit log records actions taken, not personal
-  details.
+- **Personal data stays out of the repo; secrets stay out of the logs:**
+  per-hire input files are git-ignored, and the audit log records actions
+  taken — never passwords or contact details. Names do appear in it (an
+  account's display name, UPNs built from names), since they are what an
+  action is about. Every line is tagged with the operator's OS user and
+  machine, but the log is a local text file the operator can edit; for an
+  authoritative who-did-what, Entra's own audit log records every change
+  the app makes under the app's identity.
 - **Reuse or create — human decides:** some hires take over an existing role
   account, others get a fresh personal one. The `discover` command reports the
   role account's status (whose name is on it, enabled/disabled, last sign-in);

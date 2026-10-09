@@ -260,6 +260,9 @@ def test_every_action_lands_in_the_audit_log(wire, tmp_path):
     log = audit_text(tmp_path)
     assert f"terminate: {UPN}" in log
     assert "account disabled" in log and "sessions revoked" in log
+    # Every line names who ran it.
+    assert all(f"[{provision.OPERATOR}]" in line for line in log.splitlines())
+    assert "@" in provision.OPERATOR
     assert "removed from group: Elm Court Staff" in log
     assert "removed 1 license(s)" in log
 
