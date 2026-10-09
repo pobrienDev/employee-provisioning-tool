@@ -116,3 +116,79 @@ def test_a_bad_placeholder_is_a_clear_error(draft_env, tmp_path):
 
     with pytest.raises(provision.ProvisionError, match="placeholder problem"):
         provision.email_draft(HIRE, "Taylor Example", "t@example.com", "Pw", config={})
+
+
+# --- the Outlook draft: built in the operator's mailbox ------------------------------
+
+class FakeDelegated:
+    """Stand-in for DelegatedGraphClient: records the draft and attachments;
+    `fail` names a file whose upload raises after the draft exists."""
+
+    def __init__(self, fail=None):
+        self.fail = fail
+        self.drafts = []
+        self.attached = []
+
+    def create_draft(self, payload):
+        self.drafts.append(payload)
+        return {"id": "msg-1", "webLink": "https://outlook.example/msg-1"}
+
+    def add_file_attachment(self, message_id, name, data, **kwargs):
+        if name == self.fail:
+            raise provision.GraphError("Graph API error (413) — too large", status=413)
+        self.attached.append((message_id, name, len(data), kwargs))
+
+
+@pytest.fixture
+def delegated(monkeypatch):
+    fake = FakeDelegated()
+    monkeypatch.setattr(provision.DelegatedGraphClient, "from_env", classmethod(lambda cls: fake))
+    monkeypatch.setattr(provision, "load_signature", lambda: (None, []))
+    return fake
+
+
+def test_draft_carries_recipients_body_and_attachments(delegated, tmp_path):
+    pdf = tmp_path / "MFA Instructions.pdf"
+    pdf.write_bytes(b"%PDF" * 10)
+
+    link, warnings = provision.create_outlook_draft(
+        "to@example.com", "rpm@example.com; boss@example.com", "Hi", "Body https://outlook.office.com", [str(pdf)],
+    )
+
+    assert link == "https://outlook.example/msg-1" and warnings == []
+    draft = delegated.drafts[0]
+    assert draft["subject"] == "Hi"
+    assert draft["toRecipients"] == [{"emailAddress": {"address": "to@example.com"}}]
+    assert [r["emailAddress"]["address"] for r in draft["ccRecipients"]] == ["rpm@example.com", "boss@example.com"]
+    assert '<a href="https://outlook.office.com">' in draft["body"]["content"]
+    assert delegated.attached == [("msg-1", "MFA Instructions.pdf", 40, {})]
+
+
+def test_missing_and_oversized_files_are_warned_about_before_the_draft_exists(delegated, monkeypatch, tmp_path):
+    big = tmp_path / "video.mp4"
+    big.write_bytes(b"0" * 200)
+    monkeypatch.setattr(provision, "ATTACHMENT_UPLOAD_LIMIT", 100)
+
+    _, warnings = provision.create_outlook_draft("to@example.com", None, "Hi", "Body", [str(tmp_path / "nope.pdf"), str(big)])
+
+    assert len(delegated.drafts) == 1 and delegated.attached == []
+    assert warnings[0].startswith("attachment not found")
+    assert "over Outlook's 150 MB limit" in warnings[1]
+
+
+def test_a_failed_upload_after_the_draft_exists_is_reported_as_incomplete(delegated, draft_env, capsys, tmp_path):
+    ok = tmp_path / "a.pdf"
+    ok.write_bytes(b"a")
+    bad = tmp_path / "b.pdf"
+    bad.write_bytes(b"b")
+    delegated.fail = "b.pdf"
+
+    provision.email_draft(
+        HIRE, "Taylor Example", "t@example.com", "Pw", config={"email_attachments": [str(ok), str(bad)]}, open_draft=True,
+    )
+
+    out = capsys.readouterr().out
+    assert [a[1] for a in delegated.attached] == ["a.pdf"]
+    assert "outlook draft: could not attach b.pdf" in out
+    assert "draft created but incomplete" in out
+    assert "https://outlook.example/msg-1" in out

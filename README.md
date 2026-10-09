@@ -302,11 +302,14 @@ overwritten), and with `--open-draft` it sits in the draft, and later in
 Sent Items, like any other email. With `--open-draft` (on `new` or `reuse`), the email is
 created directly in **your Outlook Drafts folder** via the Graph API —
 recipients, subject, formatted body, any `email_attachments` from
-`config.yaml` (say, MFA setup instructions), and your captured signature
-already in place. It appears in new Outlook, the web, and your phone like
-any other draft; nothing is sent until you open it and click Send, and
-deleting it discards it. If the draft can't be created, the printed draft
-and clipboard copy still stand.
+`config.yaml` (say, MFA setup instructions — files of 3 MB and up go
+through an upload session, up to Outlook's 150 MB limit), and your captured
+signature already in place. It appears in new Outlook, the web, and your
+phone like any other draft; nothing is sent until you open it and click
+Send, and deleting it discards it. If the draft can't be created, the
+printed draft and clipboard copy still stand; if it is created but an
+attachment or signature image fails to upload, the run says "draft created
+but incomplete" and names what to add in Outlook.
 
 This is the tool's one delegated feature: it signs in as *you* (a
 device-code prompt, cached so it's occasional) and touches only your own

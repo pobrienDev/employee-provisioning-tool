@@ -45,6 +45,7 @@ class FakeSession:
         self.token_responses = list(token_responses or [token_response()])
         self.token_posts = 0
         self.requests = []
+        self.puts = []
 
     def post(self, url, data=None, timeout=None):
         self.token_posts += 1
@@ -53,6 +54,11 @@ class FakeSession:
 
     def request(self, method, url, headers=None, timeout=None, **kwargs):
         self.requests.append((method, url, dict(headers or {}), kwargs))
+        return self.responses.pop(0)
+
+    def put(self, url, data=None, headers=None, timeout=None):
+        """Upload-session ranges go straight to the pre-authenticated URL."""
+        self.puts.append((url, dict(headers or {}), len(data)))
         return self.responses.pop(0)
 
 
@@ -460,3 +466,70 @@ def test_address_holder_escapes_apostrophes_in_the_filter():
     assert client.address_holder("o'brien", "d.com") is None
 
     assert "mailNickname eq 'o''brien'" in client.session.requests[0][3]["params"]["$filter"]
+
+
+# --- draft attachments: small files inline, large ones by upload session ----------
+
+from graph_api import ATTACHMENT_INLINE_LIMIT, UPLOAD_CHUNK
+
+
+def test_a_small_file_is_attached_in_one_post():
+    client = make_client([FakeResponse(201, {"id": "att-1"})])
+
+    client.add_file_attachment("msg-1", "notes.pdf", b"x" * 1000)
+
+    method, url, headers, kwargs = client.session.requests[0]
+    assert (method, url) == ("POST", f"{GRAPH_BASE}/me/messages/msg-1/attachments")
+    assert kwargs["json"]["name"] == "notes.pdf"
+    assert kwargs["json"]["contentBytes"]
+    assert "contentId" not in kwargs["json"]
+    assert client.session.puts == []
+
+
+def test_a_large_file_goes_through_an_upload_session_in_ranges():
+    data = b"y" * (ATTACHMENT_INLINE_LIMIT + 1)   # exactly one byte past the inline limit
+    client = make_client([
+        FakeResponse(201, {"uploadUrl": "https://outlook.office.com/upload?authtoken=t"}),
+        FakeResponse(200, {"nextExpectedRanges": [str(UPLOAD_CHUNK)]}),
+        FakeResponse(201),
+    ])
+
+    client.add_file_attachment("msg-1", "MFA Instructions.pdf", data)
+
+    method, url, _, kwargs = client.session.requests[0]
+    assert (method, url) == ("POST", f"{GRAPH_BASE}/me/messages/msg-1/attachments/createUploadSession")
+    assert kwargs["json"] == {"AttachmentItem": {"attachmentType": "file", "name": "MFA Instructions.pdf", "size": len(data)}}
+    # Two ranges, in order, each labelled with its byte span and the total...
+    (u1, h1, n1), (u2, h2, n2) = client.session.puts
+    assert u1 == u2 == "https://outlook.office.com/upload?authtoken=t"
+    assert (n1, n2) == (UPLOAD_CHUNK, 1)
+    assert h1["Content-Range"] == f"bytes 0-{UPLOAD_CHUNK - 1}/{len(data)}"
+    assert h2["Content-Range"] == f"bytes {UPLOAD_CHUNK}-{UPLOAD_CHUNK}/{len(data)}"
+    # ...on the pre-authenticated URL, so no bearer token goes along.
+    assert "Authorization" not in h1 and "Authorization" not in h2
+
+
+def test_an_inline_signature_image_keeps_its_content_id_on_both_paths():
+    client = make_client([
+        FakeResponse(201, {"id": "att"}),
+        FakeResponse(201, {"uploadUrl": "https://outlook.office.com/upload"}),
+        FakeResponse(201),
+    ])
+
+    client.add_file_attachment("m", "logo.png", b"s", content_type="image/png", content_id="logo", is_inline=True)
+    client.add_file_attachment("m", "big.png", b"b" * ATTACHMENT_INLINE_LIMIT, content_type="image/png", content_id="big", is_inline=True)
+
+    small = client.session.requests[0][3]["json"]
+    assert (small["contentId"], small["isInline"], small["contentType"]) == ("logo", True, "image/png")
+    large = client.session.requests[1][3]["json"]["AttachmentItem"]
+    assert (large["contentId"], large["isInline"], large["contentType"]) == ("big", True, "image/png")
+
+
+def test_a_rejected_range_is_a_graph_error():
+    client = make_client([
+        FakeResponse(201, {"uploadUrl": "https://outlook.office.com/upload"}),
+        FakeResponse(413, text="too big"),
+    ])
+
+    with pytest.raises(GraphError, match="upload of big.pdf failed"):
+        client.add_file_attachment("m", "big.pdf", b"b" * ATTACHMENT_INLINE_LIMIT)

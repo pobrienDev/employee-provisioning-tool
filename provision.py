@@ -38,6 +38,7 @@ from pathlib import Path
 import yaml
 
 from graph_api import (
+    ATTACHMENT_UPLOAD_LIMIT,
     AUTH_METHOD_PATHS,
     PASSWORD_METHOD_TYPE,
     ConfigError,
@@ -943,10 +944,31 @@ def create_outlook_draft(to, cc, subject, body, attachments):
     so the draft shows up in Outlook's Drafts folder — new Outlook, web,
     and phone included — with the captured signature appended and the
     configured files attached. Nothing is sent: review and Send happen in
-    Outlook, and deleting the draft discards it. Returns (webLink, warnings).
+    Outlook, and deleting the draft discards it.
+
+    Returns (webLink, warnings). The files are checked before the draft is
+    created, so a bad path can't leave a half-built draft behind; once the
+    draft exists, anything that fails to attach becomes a warning rather
+    than an exception, since the draft is already there to be fixed up.
     """
     client = DelegatedGraphClient.from_env()
     signature, signature_files = load_signature()
+
+    files, warnings = [], []
+    for path in attachments or []:
+        file = Path(path)
+        if not file.exists():
+            warnings.append(f"attachment not found: {path}")
+            continue
+        size = file.stat().st_size
+        if size > ATTACHMENT_UPLOAD_LIMIT:
+            warnings.append(
+                f"attachment skipped — {size // (1024 * 1024)} MB is over Outlook's "
+                f"150 MB limit: {path}"
+            )
+            continue
+        files.append(file)
+
     content = "<html><body>" + draft_body_html(body)
     if signature:
         content += signature
@@ -964,28 +986,24 @@ def create_outlook_draft(to, cc, subject, body, attachments):
         ]
     message = client.create_draft(payload)
 
-    warnings = []
-    for path in attachments or []:
-        file = Path(path)
-        if not file.exists():
-            warnings.append(f"attachment not found: {path}")
-            continue
-        client.add_attachment(message["id"], {
-            "@odata.type": "#microsoft.graph.fileAttachment",
-            "name": file.name,
-            "contentBytes": base64.b64encode(file.read_bytes()).decode("ascii"),
-        })
+    for file in files:
+        try:
+            client.add_file_attachment(message["id"], file.name, file.read_bytes())
+        except (OSError, GraphError) as exc:
+            warnings.append(f"could not attach {file.name}: {exc}")
     for item in signature_files:
         # Re-attach the signature's images exactly as Outlook stored them —
         # same contentId the HTML references — so the logo renders inline.
-        client.add_attachment(message["id"], {
-            "@odata.type": "#microsoft.graph.fileAttachment",
-            "name": item.get("name") or item["file"],
-            "contentBytes": base64.b64encode(item["path"].read_bytes()).decode("ascii"),
-            "contentType": item.get("contentType"),
-            "contentId": item.get("contentId"),
-            "isInline": bool(item.get("isInline", True)),
-        })
+        name = item.get("name") or item["file"]
+        try:
+            client.add_file_attachment(
+                message["id"], name, item["path"].read_bytes(),
+                content_type=item.get("contentType"),
+                content_id=item.get("contentId"),
+                is_inline=bool(item.get("isInline", True)),
+            )
+        except (OSError, GraphError) as exc:
+            warnings.append(f"could not attach signature image {name}: {exc}")
     return message.get("webLink"), warnings
 
 
@@ -1059,10 +1077,16 @@ def email_draft(hire, display_name, upn, password, config=None, open_draft=False
         else:
             for warning in warnings:
                 act(f"outlook draft: {warning}")
-            act(
-                "draft created in your Outlook Drafts folder — it holds the temporary "
-                "password until you send or delete it; review it and click Send yourself"
-            )
+            if warnings:
+                act(
+                    "draft created but incomplete — it is in your Outlook Drafts folder "
+                    "without the item(s) above; add them there before sending"
+                )
+            else:
+                act(
+                    "draft created in your Outlook Drafts folder — it holds the temporary "
+                    "password until you send or delete it; review it and click Send yourself"
+                )
             if web_link:
                 print(f"  open it directly: {web_link}")
             if password is None:

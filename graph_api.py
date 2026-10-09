@@ -11,6 +11,7 @@ the mailbox features (drafts, signature capture): it signs the operator in
 and reaches that operator's own mailbox and nothing else.
 """
 
+import base64
 import json
 import os
 import time
@@ -84,6 +85,13 @@ AUTH_METHOD_PATHS = {
 # A user has at most one of these, so the endpoint takes no method ID.
 SINGLETON_AUTH_METHOD_PATHS = {"qrCodePinMethod"}
 PASSWORD_METHOD_TYPE = "#microsoft.graph.passwordAuthenticationMethod"
+
+
+# Outlook attachment limits: a single POST takes files under 3 MB; larger
+# files go through an upload session in ranges of at most 4 MB, up to 150 MB.
+ATTACHMENT_INLINE_LIMIT = 3 * 1024 * 1024
+ATTACHMENT_UPLOAD_LIMIT = 150 * 1024 * 1024
+UPLOAD_CHUNK = 3 * 1024 * 1024
 
 
 class ConfigError(Exception):
@@ -232,11 +240,63 @@ class GraphClient:
         return self._request("POST", "/me/messages", idempotent=False, json=payload).json()
 
     def add_attachment(self, message_id, payload):
-        """Attach a file to a draft message (delegated only)."""
+        """Attach a file under 3 MB to a draft message (delegated only)."""
         self._request(
             "POST", f"/me/messages/{quote(message_id, safe='')}/attachments",
             json=payload,
         )
+
+    def add_file_attachment(self, message_id, name, data, content_type=None,
+                            content_id=None, is_inline=False):
+        """Attach a file to a draft message, whatever its size (delegated only).
+
+        Under 3 MB it is one POST with the content inline. From 3 MB the
+        single POST is refused, so the file goes through an upload session:
+        createUploadSession returns a pre-authenticated URL (no Authorization
+        header on it), and the bytes are PUT in order in ranges under 4 MB.
+        """
+        if len(data) < ATTACHMENT_INLINE_LIMIT:
+            payload = {
+                "@odata.type": "#microsoft.graph.fileAttachment",
+                "name": name,
+                "contentBytes": base64.b64encode(data).decode("ascii"),
+            }
+            if content_type:
+                payload["contentType"] = content_type
+            if content_id:
+                payload["contentId"] = content_id
+                payload["isInline"] = bool(is_inline)
+            self.add_attachment(message_id, payload)
+            return
+
+        item = {"attachmentType": "file", "name": name, "size": len(data)}
+        if content_type:
+            item["contentType"] = content_type
+        if content_id:
+            item["contentId"] = content_id
+            item["isInline"] = bool(is_inline)
+        session = self._request(
+            "POST",
+            f"/me/messages/{quote(message_id, safe='')}/attachments/createUploadSession",
+            idempotent=False, json={"AttachmentItem": item},
+        ).json()
+        upload_url = session["uploadUrl"]
+        total = len(data)
+        for start in range(0, total, UPLOAD_CHUNK):
+            chunk = data[start:start + UPLOAD_CHUNK]
+            headers = {
+                "Content-Type": "application/octet-stream",
+                "Content-Range": f"bytes {start}-{start + len(chunk) - 1}/{total}",
+            }
+            try:
+                response = self.session.put(upload_url, data=chunk, headers=headers, timeout=120)
+            except requests.RequestException as exc:
+                raise GraphError(f"upload of {name} failed: {exc}") from exc
+            if response.status_code >= 400:
+                raise GraphError(
+                    f"upload of {name} failed ({response.status_code}): {response.text}",
+                    status=response.status_code,
+                )
 
     def find_drafts(self, subject, select="id,subject,lastModifiedDateTime"):
         """Drafts whose subject matches exactly (delegated only)."""
