@@ -130,6 +130,68 @@ def print_user(user, last_sign_in=None):
         print(f"{'':28}last sign-in: {last_sign_in}")
 
 
+def get_user_with_sign_in(client, upn, fields=USER_FIELDS):
+    """One user plus signInActivity when the tenant allows reading it
+    (AuditLog.Read.All and an Entra ID P1 license); the plain fields
+    otherwise. None when no such account exists."""
+    try:
+        return client.get_user(upn, fields + ",signInActivity")
+    except GraphError as exc:
+        if exc.status not in (400, 403):
+            raise
+        return client.get_user(upn, fields)
+
+
+def last_sign_in(user):
+    """The account's last interactive sign-in time, or None."""
+    return (user.get("signInActivity") or {}).get("lastSignInDateTime")
+
+
+def role_number(local, config):
+    """The property number of a role-format local part ("manager619" ->
+    "619"), or None when it doesn't start with a configured role prefix."""
+    roles = (config.get("naming") or {}).get("roles") or []
+    for role in roles:
+        rest = local[len(str(role)):]
+        if local.startswith(str(role)) and rest.isdigit():
+            return rest
+    return None
+
+
+def reuse_concerns(upn, user, hire, config):
+    """Reasons the reuse target looks like the wrong account.
+
+    reuse resets the password, revokes sessions, renames the account and
+    wipes its MFA methods — on an active employee's account that is a
+    lockout, so anything that doesn't look like a departed holder's role
+    account is called out: a UPN that isn't a configured role prefix, a
+    role account at a different property than hire.yaml names, or an
+    account that is still enabled.
+    """
+    concerns = []
+    local = upn.split("@", 1)[0]
+    roles = (config.get("naming") or {}).get("roles") or []
+    if roles:
+        number = role_number(local, config)
+        numbers = property_numbers(hire.get("property_number"))
+        if number is None:
+            concerns.append(
+                f"{local} is not a role account (naming.roles: {', '.join(map(str, roles))})"
+            )
+        elif numbers and number not in numbers:
+            concerns.append(
+                f"{local} belongs to property {number}, but hire.yaml says "
+                f"{property_label(hire.get('property_number'))}"
+            )
+    if user.get("accountEnabled"):
+        when = last_sign_in(user)
+        concerns.append(
+            "the account is enabled — someone may still be using it"
+            + (f" (last sign-in {when})" if when else "")
+        )
+    return concerns
+
+
 def tenant_domain(config, required=True):
     domain = (config.get("tenant") or {}).get("domain")
     if not domain and required:
@@ -522,9 +584,7 @@ def role_alias_note(client, hire, config, upn):
     aliases (proxyAddresses is read-only), so the tool picks the first free
     personal address and prints it as a manual step.
     """
-    local = upn.split("@", 1)[0]
-    roles = (config.get("naming") or {}).get("roles") or []
-    if not any(local.startswith(role) and local[len(role):].isdigit() for role in roles):
+    if role_number(upn.split("@", 1)[0], config) is None:
         return
     try:
         alias = pick_upn(client, hire, config)
@@ -939,14 +999,31 @@ def cmd_reuse(args):
     upn = target if "@" in target or not domain else f"{target}@{domain}"
     audit(f"reuse: {upn}{' (dry-run)' if dry else ''}")
 
-    user = client.get_user(upn, USER_FIELDS)
+    user = get_user_with_sign_in(client, upn)
     if not user:
         raise ProvisionError(f"{upn} not found — run discover first to see what exists")
 
-    old_status = "enabled" if user.get("accountEnabled") else "disabled"
-    print(f"Reusing {upn} (was: {user.get('displayName')}, {old_status})")
-
     display_name = display_name_for(hire, config)
+    print(f"Reusing {upn}:")
+    print_user(user, last_sign_in(user))
+    print(
+        "  plan: reset the password, revoke sessions, wipe registered MFA methods, "
+        f"rename to {display_name}, enable the account, then license and groups"
+    )
+    concerns = reuse_concerns(upn, user, hire, config)
+    for concern in concerns:
+        print(f"  warning: {concern}")
+    if not dry:
+        if not args.yes:
+            print("  nothing done — re-run with --yes to hand this account over")
+            audit("reuse: preview only, nothing changed")
+            return
+        if concerns and not args.force:
+            raise ProvisionError(
+                "refusing to reuse this account — " + "; ".join(concerns)
+                + ". Re-run with --force if this is really the account to hand over."
+            )
+
     if dry:
         act("[dry-run] would reset the password and revoke sessions")
         password = None
@@ -1429,6 +1506,16 @@ def main(argv=None):
         "reuse", help="hand an existing role account to the hire in hire.yaml"
     )
     reuse.add_argument("--upn", help="role account to reuse (defaults to reuse_upn in hire.yaml)")
+    reuse.add_argument(
+        "--yes", action="store_true",
+        help="actually hand the account over; without it the command only "
+             "shows the account and the plan",
+    )
+    reuse.add_argument(
+        "--force", action="store_true",
+        help="proceed even when the account is enabled, or its UPN isn't a "
+             "configured role account for the hire's property",
+    )
     reuse.add_argument(
         "--dry-run", action="store_true",
         help="print what would happen without changing anything",

@@ -119,8 +119,9 @@ python provision.py new                   # fresh account for the hire in hire.y
 python provision.py new --upn tsmith2     # ...with an explicit UPN
 python provision.py new --join-dls        # ...also joining distribution lists (signs in as you)
 python provision.py new --open-draft      # ...also drafting the email in your Outlook Drafts
-python provision.py reuse                 # hand reuse_upn's account to the hire
-python provision.py reuse --upn manager619
+python provision.py reuse                 # preview handing reuse_upn's account to the hire
+python provision.py reuse --yes           # actually hand it over
+python provision.py reuse --upn manager619 --yes
 python provision.py skus                  # license SKU IDs for config.yaml
 python provision.py capture-signature     # one-time: save your Outlook signature for --open-draft
 python provision.py terminate manager619        # preview the offboarding plan
@@ -142,7 +143,13 @@ holds it. An explicit `--upn` is never substituted — if it's taken, the run
 stops. The account is created with a temporary must-change password. `reuse` locks the departed
 employee out first — password reset, then session revocation — then wipes
 their registered MFA methods so the new hire enrolls their own, before
-renaming and re-enabling the account.
+renaming and re-enabling the account. Like `terminate`, it changes nothing
+without `--yes`: on its own it prints the account it would take over (whose
+name is on it, enabled or disabled, last sign-in) and the plan. Because a
+mistyped UPN would lock a working employee out, it also refuses — unless
+`--force` is given — when the target is still enabled, when its UPN isn't a
+configured role prefix (`naming.roles`), or when the role account belongs to
+a different property than `hire.yaml` names.
 
 Either path stamps the hire's details onto the account's contact fields:
 title → Job title, property name → Office, property number → Department —

@@ -138,7 +138,7 @@ def audit_text(tmp_path):
 def test_reuse_wipes_mfa_before_enabling_the_account(wire):
     client = wire(FakeGraph(make_user(), methods=[PHONE, AUTHENTICATOR]))
 
-    assert provision.main(["reuse"]) == 0
+    assert provision.main(["reuse", "--yes"]) == 0
 
     kinds = [call[0] for call in client.writes]
     # Lock out first (password, then sessions), wipe MFA, and only then
@@ -155,3 +155,92 @@ def test_reuse_wipes_mfa_before_enabling_the_account(wire):
     assert client.writes[-1][2]["displayName"] == "Property Manager at Elm Court"
     deleted = [(call[2], call[3]) for call in client.writes if call[0] == "delete_auth_method"]
     assert deleted == [("phoneMethods", "m-phone"), ("microsoftAuthenticatorMethods", "m-app")]
+
+
+# --- preview, dry-run and the wrong-account guard ------------------------------
+
+def test_without_yes_nothing_is_written(wire, capsys, tmp_path):
+    client = wire(FakeGraph(make_user(), methods=[PHONE]))
+
+    assert provision.main(["reuse"]) == 0
+
+    assert client.writes == []
+    out = capsys.readouterr().out
+    assert "Reusing manager619@example.com" in out
+    assert "[DISABLED]" in out
+    assert "plan: reset the password, revoke sessions" in out
+    assert "re-run with --yes" in out
+    assert "preview only" in audit_text(tmp_path)
+
+
+def test_dry_run_writes_nothing_and_says_what_it_would_do(wire, capsys):
+    client = wire(FakeGraph(make_user(), methods=[PHONE, AUTHENTICATOR]))
+
+    assert provision.main(["reuse", "--dry-run"]) == 0
+
+    assert client.writes == []
+    out = capsys.readouterr().out
+    assert "[dry-run] would reset the password and revoke sessions" in out
+    assert "[dry-run] would remove 2 registered mfa method(s)" in out
+    assert "[dry-run] would rename to Property Manager at Elm Court and enable the account" in out
+
+
+def test_an_enabled_account_is_refused_without_force(wire, capsys):
+    user = make_user(enabled=True)
+    user["signInActivity"] = {"lastSignInDateTime": "2026-10-08T15:04:05Z"}
+    client = wire(FakeGraph(user, methods=[PHONE]))
+
+    assert provision.main(["reuse", "--yes"]) == 1
+
+    assert client.writes == []
+    captured = capsys.readouterr()
+    assert "warning: the account is enabled" in captured.out
+    assert "last sign-in 2026-10-08T15:04:05Z" in captured.out
+    assert "refusing to reuse this account" in captured.err
+    assert "--force" in captured.err
+
+
+def test_a_non_role_upn_is_refused_without_force(wire, capsys):
+    client = wire(FakeGraph(make_user(), methods=[]))
+
+    # A typo — tsmith instead of tsmith2 — must not lock a real person out.
+    assert provision.main(["reuse", "--upn", "tsmith", "--yes"]) == 1
+
+    assert client.writes == []
+    assert "tsmith is not a role account" in capsys.readouterr().out
+
+
+def test_a_role_account_at_another_property_is_refused_without_force(wire, capsys):
+    client = wire(FakeGraph(make_user(), methods=[]))
+
+    assert provision.main(["reuse", "--upn", "manager536", "--yes"]) == 1
+
+    assert client.writes == []
+    assert "manager536 belongs to property 536, but hire.yaml says 619" in capsys.readouterr().out
+
+
+def test_force_overrides_the_guard(wire):
+    client = wire(FakeGraph(make_user(enabled=True), methods=[]))
+
+    assert provision.main(["reuse", "--yes", "--force"]) == 0
+
+    assert [call[0] for call in client.writes] == ["update_user", "revoke_sessions", "update_user"]
+
+
+def test_sign_in_activity_degrades_when_not_readable(wire):
+    """Without AuditLog.Read.All the signInActivity select is refused;
+    the lookup must fall back to the plain fields rather than fail."""
+
+    class NoSignIn(FakeGraph):
+        def get_user(self, upn_or_id, select):
+            self.calls.append(("get_user", upn_or_id, select))
+            if "signInActivity" in select:
+                raise GraphError("Graph API error (403) — Authorization_RequestDenied", status=403)
+            return self.user
+
+    client = wire(NoSignIn(make_user(), methods=[]))
+
+    assert provision.main(["reuse", "--yes"]) == 0
+
+    selects = [call[2] for call in client.calls if call[0] == "get_user"]
+    assert "signInActivity" in selects[0] and "signInActivity" not in selects[1]
