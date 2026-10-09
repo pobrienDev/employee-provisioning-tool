@@ -232,8 +232,32 @@ def announce_tenant(client, config):
     act(f"tenant: {tenant_id}" + (f" ({domain})" if domain else ""))
 
 
+# Letters that NFKD decomposition can't reduce to an ASCII base letter — they
+# have no decomposition, so without this table they would simply vanish
+# ("Øyvind Strauß" -> ystrau@, wrong initial and a cut-off surname).
+TRANSLITERATIONS = str.maketrans({
+    "ß": "ss", "ẞ": "SS",
+    "ø": "o", "Ø": "O",
+    "æ": "ae", "Æ": "AE",
+    "œ": "oe", "Œ": "OE",
+    "ł": "l", "Ł": "L",
+    "đ": "d", "Đ": "D",
+    "ð": "d", "Ð": "D",
+    "þ": "th", "Þ": "Th",
+    "ı": "i",
+    "ħ": "h", "Ħ": "H",
+    "ŧ": "t", "Ŧ": "T",
+})
+
+
 def sanitize_local(text):
-    """Reduce a name fragment to the ASCII letters/digits a UPN allows."""
+    """Reduce a name fragment to the ASCII letters/digits a UPN allows.
+
+    Accented letters lose their accents (NFKD, then drop the combining
+    marks); letters with no accent form to fall back to are transliterated
+    first. Anything else that isn't an ASCII letter or digit is dropped.
+    """
+    text = str(text).translate(TRANSLITERATIONS)
     ascii_text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
     return "".join(ch for ch in ascii_text if ch.isalnum()).lower()
 

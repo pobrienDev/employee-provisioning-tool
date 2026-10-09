@@ -70,6 +70,25 @@ def test_sanitizes_spaces_punctuation_and_accents():
     assert pick_upn(fake, hire("José", "Muñoz"), CONFIG) == "jmunoz@d.com"
 
 
+@pytest.mark.parametrize("name, expected", [
+    ("Øyvind", "oyvind"),       # no decomposition: would otherwise become "yvind"
+    ("Strauß", "strauss"),
+    ("Łukasz", "lukasz"),
+    ("Æsa", "aesa"),
+    ("Þórður", "thordur"),
+    ("Đorđe", "dorde"),
+    ("Søren Kierkegaard", "sorenkierkegaard"),
+])
+def test_letters_without_a_decomposition_are_transliterated_not_dropped(name, expected):
+    assert sanitize_local(name) == expected
+
+
+def test_a_transliterated_name_keeps_its_initial():
+    fake = FakeGraph({})
+    # Without transliteration this was "ystrau@": wrong initial, cut-off surname.
+    assert pick_upn(fake, hire("Øyvind", "Strauß"), CONFIG) == "ostrauss@d.com"
+
+
 def test_first_initial_plus_last_name_when_available():
     fake = FakeGraph({})
     assert pick_upn(fake, hire("Pat", "Test"), CONFIG) == "ptest@d.com"
