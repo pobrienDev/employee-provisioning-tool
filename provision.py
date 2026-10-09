@@ -47,7 +47,10 @@ from graph_api import (
 BASE_DIR = Path(__file__).parent
 LOG_DIR = BASE_DIR / "logs"
 SIGNATURE_DIR = BASE_DIR / "signature"
-USER_FIELDS = "id,displayName,userPrincipalName,accountEnabled,jobTitle,officeLocation"
+USER_FIELDS = (
+    "id,displayName,userPrincipalName,accountEnabled,jobTitle,"
+    "givenName,surname,officeLocation"
+)
 
 
 class ProvisionError(Exception):
@@ -119,6 +122,9 @@ def temp_password():
 
 
 def print_user(user, last_sign_in=None):
+    """One account per line, plus who holds it: a role account displays as
+    "{title} at {property}", so the person's name lives in givenName and
+    surname and is what the reuse-or-new decision turns on."""
     name = user.get("displayName") or "(no name)"
     upn = user.get("userPrincipalName") or "?"
     status = "enabled" if user.get("accountEnabled") else "DISABLED"
@@ -126,6 +132,16 @@ def print_user(user, last_sign_in=None):
     if user.get("jobTitle"):
         line += f"  {user['jobTitle']}"
     print(line)
+    holder = " ".join(
+        part for part in (user.get("givenName"), user.get("surname")) if part
+    )
+    details = []
+    if holder:
+        details.append(f"held by: {holder}")
+    if user.get("officeLocation"):
+        details.append(f"office: {user['officeLocation']}")
+    if details:
+        print(f"{'':28}" + "  ·  ".join(details))
     if last_sign_in:
         print(f"{'':28}last sign-in: {last_sign_in}")
 
