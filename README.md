@@ -236,7 +236,11 @@ prefixes at both numbers.
 Display names follow the role-account convention: accounts at a property
 display as "{title} at {property name}" (e.g. "Property Manager at Example
 Apartments"), while accounts at the corporate office (`corporate_property`
-in `config.yaml`) keep a personal "First Last" name. When a form words a
+in `config.yaml`) keep a personal "First Last" name. Titles listed under
+`naming.corporate_titles` (say, Regional Property Manager) count as
+corporate whatever property the form names: with no property number they
+are placed at `corporate_property`, and either way they get the corporate
+groups and license chain and a personal display name. When a form words a
 title awkwardly, `naming.title_display` can restate it for the display name
 alone ("Concierge/Leasing" → "Leasing Concierge") — the Job title attribute
 and every matching rule keep the form's exact wording. The login-info email
