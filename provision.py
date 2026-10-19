@@ -358,10 +358,38 @@ def property_label(value):
     return "/".join(property_numbers(value))
 
 
+def is_corporate_title(hire, config):
+    """True when the hire's title is one naming.corporate_titles lists —
+    a role that belongs to the corporate office whatever property the form
+    names (a Regional Property Manager oversees several)."""
+    title = (hire.get("title") or "").strip().lower()
+    titles = (config.get("naming") or {}).get("corporate_titles") or []
+    return bool(title) and any(str(t).strip().lower() == title for t in titles)
+
+
 def is_corporate(hire, config):
-    """True when the hire belongs to the corporate office property."""
+    """True when the hire belongs to the corporate office: at the corporate
+    property, or in a title naming.corporate_titles marks as corporate."""
     corporate = str(config.get("corporate_property") or "50")
-    return property_numbers(hire.get("property_number")) == [corporate]
+    if property_numbers(hire.get("property_number")) == [corporate]:
+        return True
+    return is_corporate_title(hire, config)
+
+
+def apply_corporate_title(hire, config):
+    """Default a corporate-title hire to the corporate property.
+
+    A form for a corporate role often leaves the property blank or names
+    whichever property the person happens to sit at. With no property
+    number, the hire is placed at corporate_property so the department,
+    groups and license all follow the corporate rules; a property the form
+    did give is kept (it still stamps Department), but is_corporate() and
+    the display name treat the hire as corporate regardless.
+    """
+    if is_corporate_title(hire, config) and not property_numbers(hire.get("property_number")):
+        hire = dict(hire)
+        hire["property_number"] = str(config.get("corporate_property") or "50")
+    return hire
 
 
 def property_entries(hire, config):
@@ -1296,7 +1324,7 @@ def cmd_skus(args):
 
 def cmd_new(args):
     config = load_config()
-    hire = enrich_from_property(load_hire(), config)
+    hire = enrich_from_property(apply_corporate_title(load_hire(), config), config)
     client = GraphClient.from_env()
     dry = args.dry_run
     announce_tenant(client, config)
@@ -1389,7 +1417,7 @@ def cmd_new(args):
 
 def cmd_reuse(args):
     config = load_config()
-    hire = enrich_from_property(load_hire(), config)
+    hire = enrich_from_property(apply_corporate_title(load_hire(), config), config)
     client = GraphClient.from_env()
     dry = args.dry_run
     announce_tenant(client, config)

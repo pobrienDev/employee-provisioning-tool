@@ -346,3 +346,47 @@ def test_nothing_mapped_is_a_note_not_an_issue(quiet_log, capsys):
     assert issues == []
     out = capsys.readouterr().out
     assert "license skipped" in out and "groups skipped" in out
+
+
+# --- corporate titles ----------------------------------------------------------------------
+
+from provision import apply_corporate_title, is_corporate_title
+
+CORP_TITLES = dict(CONFIG, naming={"corporate_titles": ["Regional Property Manager", "Regional Manager"]})
+
+
+def test_a_corporate_title_matches_case_insensitively():
+    assert is_corporate_title({"title": "regional property manager"}, CORP_TITLES)
+    assert not is_corporate_title({"title": "Property Manager"}, CORP_TITLES)
+    assert not is_corporate_title({"title": "Regional Property Manager"}, CONFIG)   # not configured
+
+
+def test_a_corporate_title_without_a_property_defaults_to_corporate():
+    hire = apply_corporate_title({"first_name": "R", "last_name": "P", "title": "Regional Property Manager"}, CORP_TITLES)
+    assert hire["property_number"] == "50"
+    assert is_corporate(hire, CORP_TITLES)
+    assert display_name_for(dict(hire, property_name="Head Office"), CORP_TITLES) == "R P"
+    assert groups_for(hire, CORP_TITLES) == [G(3)]   # the corporate set, not site
+
+
+def test_a_corporate_title_with_a_property_keeps_it_but_is_still_corporate():
+    hire = apply_corporate_title(
+        {"first_name": "R", "last_name": "P", "title": "Regional Manager", "property_number": "101"}, CORP_TITLES,
+    )
+    assert hire["property_number"] == "101"   # still stamps Department
+    assert is_corporate(hire, CORP_TITLES)
+    assert display_name_for(dict(hire, property_name="Example Apartments"), CORP_TITLES) == "R P"
+    assert groups_for(hire, CORP_TITLES) == [G(1), G(2), G(3)]   # property groups + corporate set
+
+
+def test_other_titles_are_untouched():
+    hire = {"first_name": "T", "last_name": "E", "title": "Property Manager"}
+    assert apply_corporate_title(hire, CORP_TITLES) == hire
+
+
+def test_corporate_title_picks_the_corporate_license_chain():
+    client = SkuClient([sku("SPB", "s-spb", 3), sku("STANDARDPACK", "s-e1", 3)])
+    config = dict(CORP_TITLES, licensing=LICENSING)
+    hire = apply_corporate_title({"title": "Regional Property Manager"}, config)
+    sku_id, label, _, _ = choose_license(client, config, hire)
+    assert sku_id == "s-spb" and "corporate rule" in label
