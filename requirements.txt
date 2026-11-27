@@ -3,5 +3,5 @@
 # opens a pull request when a newer version exists; bump on purpose.
 requests==2.34.2
 python-dotenv==1.2.3
-pyyaml==6.0.3
+pyyaml==6.0.4
 pillow==12.3.0
